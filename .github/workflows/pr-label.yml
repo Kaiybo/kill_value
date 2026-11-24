@@ -1,0 +1,54 @@
+# Labels every pull request with the version bump it will cause when merged,
+# based on its title:
+#   feat: ...            -> release:minor  (1.3.0 -> 1.4.0)
+#   fix: / anything else -> release:patch  (1.3.0 -> 1.3.1)
+#   feat!: / BREAKING    -> release:major  (1.3.0 -> 2.0.0)
+#   docs: / ci: / chore: / test: -> release:skip (no new version)
+# Change the label by hand on the PR to override.
+name: Label version bump
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  pull-requests: write
+  issues: write
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const LABELS = {
+              'release:major': { color: 'b60205', description: 'Merging this releases a new major version' },
+              'release:minor': { color: '0e8a16', description: 'Merging this releases a new minor version (new features)' },
+              'release:patch': { color: '1d76db', description: 'Merging this releases a new patch version (fixes)' },
+              'release:skip':  { color: 'cccccc', description: 'Merging this does not release a new version' },
+            };
+            const { owner, repo } = context.repo;
+            for (const [name, l] of Object.entries(LABELS)) {
+              try { await github.rest.issues.getLabel({ owner, repo, name }); }
+              catch { await github.rest.issues.createLabel({ owner, repo, name, ...l }); }
+            }
+
+            const pr = context.payload.pull_request;
+            const current = pr.labels.map(l => l.name).filter(n => n in LABELS);
+            // A label someone set by hand (not on "opened"/"edited") wins.
+            if (current.length && !['opened', 'edited'].includes(context.payload.action)) return;
+
+            const title = pr.title.toLowerCase();
+            const body = (pr.body || '').toLowerCase();
+            let label = 'release:patch';
+            if (/^\w+(\(.*\))?!:/.test(title) || body.includes('breaking change')) label = 'release:major';
+            else if (/^feat(\(.*\))?:/.test(title)) label = 'release:minor';
+            else if (/^(docs|ci|chore|test|build|style)(\(.*\))?:/.test(title)) label = 'release:skip';
+
+            for (const name of current) {
+              if (name !== label) await github.rest.issues.removeLabel({ owner, repo, issue_number: pr.number, name });
+            }
+            if (!current.includes(label)) {
+              await github.rest.issues.addLabels({ owner, repo, issue_number: pr.number, labels: [label] });
+            }
