@@ -26,6 +26,8 @@ local DEFAULTS = {
     alerts = true,           -- announce green-or-better and rare drops
     alertQuality = 2,        -- 2 = uncommon (green)
     alertSound = false,
+    includeGather = true,    -- credit Skinning / Pick Pocket loot to the enemy it came from
+    autoSession = false,     -- archive the session and start a new one at each login
 }
 
 local EMPTY_CHECK_DELAY = 2 -- seconds after a kill before asking "does this corpse have loot?"
@@ -35,6 +37,7 @@ local ITEM_RETRIES = 10     -- attempts (0.3s apart) to fetch an uncached item's
 local RECENT_MAX = 200      -- kills kept for the "Recent kills" tab
 local SHARE_WAIT = 2.5      -- seconds to wait for "Your share of the loot is ..." in a group
 local XP_LOG_MAX = 50
+local SESSION_MAX = 100     -- archived sessions kept for the "Sessions" tab
 
 local db
 local runStart -- GetTime() when this login (or the last reset) began
@@ -42,6 +45,8 @@ local kills = {}         -- [guid] = { t, name, level, elite, state = "pending" 
 local xpLog = {}         -- recent { name, xp, t, used } from the combat XP message
 local lootHandled = false
 local lastGather = 0
+local lastGatherName     -- "Skinning", "Pick Pocket", ...
+local gathered = {}      -- [guid] = GetTime() of corpses / pockets already counted
 local gatherSpells = {}
 local lastShare          -- { ratio, t } from the most recent coin split message
 local lootCoinSeen = 0   -- coin in the loot window currently open
@@ -396,6 +401,19 @@ local function LootValue(bucket)
     return total
 end
 
+-- Value of a loot bucket as recorded (vendor) or re-priced.
+local function BucketValue(bucket)
+    if UseAuction() then return LootValue(bucket) end
+    local total = 0
+    for _, e in pairs(bucket or {}) do total = total + e.value end
+    return total
+end
+
+-- Skinning / Pick Pocket value of a stats bucket or an enemy.
+local function GatherValue(s)
+    return (s.gatherCoin or 0) + BucketValue(s.gatherLoot)
+end
+
 -- Total value of a stats bucket under the chosen price source. Anything
 -- recorded before item details were kept stays at its recorded value.
 local function StatsValue(s)
@@ -580,6 +598,7 @@ local function FinishKill(rec, coin, itemValue, itemCount, items)
     local mob = GetMob(name, true)
     mob.kills = mob.kills + 1
     mob.value = mob.value + value
+    mob.sq, mob.sqN = (mob.sq or 0) + value * value, (mob.sqN or 0) + 1
     mob.coin = mob.coin + coin
     mob.items = mob.items + itemValue
     if value > mob.best then mob.best = value end
@@ -654,6 +673,9 @@ end
 
 local function Prune()
     local now = GetTime()
+    for guid, t in pairs(gathered) do
+        if now - t > KEEP_SECONDS then gathered[guid] = nil end
+    end
     for guid, rec in pairs(kills) do
         if now - rec.t > KEEP_SECONDS and rec.state ~= "valuing" then
             kills[guid] = nil
@@ -764,7 +786,12 @@ local function StartEntry(guid, gathering)
     if gathering then
         -- Skinning a corpse that was never looted means it dropped nothing.
         if rec and rec.state == "pending" then FinishKill(rec, 0, 0, 0) end
-        return nil
+        if not db.includeGather or gathered[guid] then return nil end
+        local name = rec and rec.name or UnitNameSafe(FindUnit(guid))
+        if not name then return nil end
+        gathered[guid] = GetTime()
+        return { gather = lastGatherName or "Gathering", name = name, zone = ZoneName(),
+                 coin = 0, items = {}, count = 0 }
     end
 
     if rec and rec.state ~= "pending" then return nil end -- already counted, or ignored
@@ -792,7 +819,32 @@ local function SettleShare(entry, ratio)
     FinishKill(entry.rec, coin, entry.total, entry.count, entry.items)
 end
 
+-- Skinning / Pick Pocket loot, credited to the enemy it came from but kept
+-- apart from the kill's own drops.
+local function FinishGather(entry)
+    if not ContextAllowed() then return end
+    local value = entry.coin + entry.total
+    local targets = { db.run, db.total, GetMob(entry.name, true), GetZone(entry.zone) }
+    for _, s in ipairs(targets) do
+        s.gathered = (s.gathered or 0) + 1
+        s.gatherCoin = (s.gatherCoin or 0) + entry.coin
+        s.gatherLoot = s.gatherLoot or {}
+        for _, item in ipairs(entry.items) do AddLoot(s.gatherLoot, item) end
+    end
+    Notify()
+    if db.quiet or value == 0 then return end
+    local shown = entry.coin
+    for _, item in ipairs(entry.items) do shown = shown + ItemPrice(item.id, item.price) * item.qty end
+    local mob = db.mobs[entry.name]
+    Print(("%s %s: %s  |cff999999(%s; avg %s over %s)|r"):format(entry.gather, entry.name, Money(shown),
+        Plural(entry.count, "item"), Money(GatherValue(mob) / mob.gathered), Plural(mob.gathered, "time")))
+end
+
 local function Complete(entry)
+    if entry.gather then
+        FinishGather(entry)
+        return
+    end
     if entry.coin > 0 and db.groupShare and entry.rec.group then
         if lastShare and GetTime() - lastShare.t <= SHARE_WAIT then
             SettleShare(entry, lastShare.ratio)
@@ -907,7 +959,7 @@ local function OnSpellcast(_, _, spellID)
     spellID = Readable(spellID)
     if not spellID then return end
     local name = Safe(SpellName, spellID)
-    if name and gatherSpells[name] then lastGather = GetTime() end
+    if name and gatherSpells[name] then lastGather, lastGatherName = GetTime(), name end
 end
 
 ------------------------------------------------------------------------
@@ -940,6 +992,18 @@ local function Predict(name, level)
             coin = (mob.coin or 0) / mob.kills, items = (total - (mob.coin or 0)) / mob.kills,
             total = total, best = mob.best, drops = drops,
         }
+        -- 95% confidence range of the average, from the spread of your kills.
+        if (mob.sqN or 0) >= 3 and mob.value > 0 then
+            local n = mob.sqN
+            local mean = mob.value / mob.kills
+            local variance = math.max(0, mob.sq / n - mean * mean)
+            p.margin = 1.96 * math.sqrt(variance / n) * (total / mob.value)
+        end
+        if (mob.gathered or 0) > 0 then
+            p.gatherAvg = GatherValue(mob) / mob.gathered
+            p.gatherRate = math.min(1, mob.gathered / mob.kills)
+            p.gatherCount = mob.gathered
+        end
         local kt = (mob.timed or 0) >= MIN_TIMED and MobKillTime(mob)
         if kt and kt > 0 then
             p.killTime, p.perHour = kt, p.value * 3600 / kt
@@ -962,6 +1026,7 @@ end
 ns.MobKillTime, ns.MobXPPerHour, ns.MIN_TIMED = MobKillTime, MobXPPerHour, MIN_TIMED
 ns.StatsValue, ns.StatsItems, ns.MobValue, ns.ItemPrice = StatsValue, StatsItems, MobValue, ItemPrice
 ns.HasAuctionSource, ns.UseAuction, ns.ZoneSeconds = HasAuctionSource, UseAuction, ZoneSeconds
+ns.GatherValue, ns.BucketValue = GatherValue, BucketValue
 ns.Predict, ns.MobXP, ns.XPToLevel, ns.EstimateXP = Predict, MobXP, XPToLevel, EstimateXP
 ns.Readable, ns.Safe, ns.IsJunkCreature = Readable, Safe, IsJunkCreature
 
@@ -969,13 +1034,28 @@ ns.Readable, ns.Safe, ns.IsJunkCreature = Readable, Safe, IsJunkCreature
 -- Resets
 ------------------------------------------------------------------------
 
+-- Saves the finished session's figures for the Sessions tab.
+local function ArchiveRun()
+    local r = db.run
+    if r.kills == 0 and (r.xpKills or 0) == 0 and (r.gathered or 0) == 0 then return end
+    table.insert(db.sessions, 1, {
+        since = r.since, ended = Now(), played = RunSeconds(), combat = r.combat,
+        kills = r.kills, xpKills = r.xpKills, value = StatsValue(r), coin = r.coin,
+        gather = GatherValue(r), xp = r.xp, best = r.best, bestName = r.bestName,
+    })
+    while #db.sessions > SESSION_MAX do table.remove(db.sessions) end
+end
+
 local function ResetRun()
+    ArchiveRun()
     db.run, runStart = NewRun(), GetTime()
     Notify()
 end
 
 local function ResetAll()
     db.total, db.mobs, db.recent, db.levels, db.zones = NewStats(), {}, {}, {}, {}
+    db.run = NewRun() -- not archived: everything is being cleared
+    db.sessions = {}
     zoneNow, zoneSince = ZoneName(), GetTime()
     ResetRun()
 end
@@ -1071,6 +1151,9 @@ local function PrintSummary()
     if need and avgXP > 0 then
         Print(("   about %d more kills to level (%d XP to go)"):format(math.ceil(need / avgXP), need))
     end
+    if (db.run.gathered or 0) > 0 then
+        Print(("   plus %s from Skinning / Pick Pocket (%s)"):format(Money(GatherValue(db.run)), Plural(db.run.gathered, "time")))
+    end
     if (db.run.combat or 0) >= 60 then
         Print(("   per hour of fighting: %s, %d XP  |cff999999(%s in combat)|r"):format(
             Money(StatsValue(db.run) * 3600 / db.run.combat), db.run.xp * 3600 / db.run.combat, Duration(db.run.combat)))
@@ -1125,6 +1208,8 @@ local TOGGLES = {
     verbose = { key = "verbose", on = "Per-kill messages include this enemy's totals.", off = "Per-kill messages are one line." },
     alerts = { key = "alerts", on = "Green-or-better and rare drops are announced.", off = "Drop announcements off." },
     sound = { key = "alertSound", on = "Drop announcements play a sound.", off = "Drop announcements are silent." },
+    gather = { key = "includeGather", on = "Skinning / Pick Pocket loot is credited to the enemy.", off = "Skinning / Pick Pocket loot is ignored." },
+    sessions = { key = "autoSession", on = "A new session starts at each login (the old one is archived).", off = "Sessions run until you reset them." },
 }
 
 local function PrintHelp()
@@ -1132,7 +1217,8 @@ local function PrintHelp()
     Print("   /kv - open or close the window")
     Print("   /kv stats - print totals, averages and per-hour rates in chat")
     Print("   /kv mobs [n] - best-paying enemies by average value, in chat")
-    Print("   /kv quiet | empty | dungeons | group | share | tooltip | verbose | alerts | sound - toggle an option")
+    Print("   /kv quiet | empty | dungeons | group | share | tooltip | verbose | alerts | sound | gather | sessions - toggle an option")
+    Print("   /kv export [enemies | loot | zones | recent | sessions] - copy a table as CSV")
     Print("   /kv price vendor | auction - value items at vendor or auction price (Auctionator / TSM)")
     Print("   /kv goal 100g - track progress toward a gold goal;  /kv goal clear - remove it")
     Print("   /kv reset - start the since-reset totals over;  /kv reset all - clear everything")
@@ -1155,6 +1241,8 @@ SlashCmdList.KILLVALUE = function(msg)
         db[t.key] = not db[t.key]
         Print(db[t.key] and t.on or t.off)
         Notify()
+    elseif cmd == "export" then
+        if ns.ShowExport then ns.ShowExport(arg ~= "" and arg:lower() or "enemies") end
     elseif cmd == "price" then
         local src = arg:lower()
         if src == "vendor" or src == "auction" then db.priceSource = src end
@@ -1194,7 +1282,7 @@ SlashCmdList.KILLVALUE = function(msg)
             end
         else
             ResetRun()
-            Print("Since-reset totals started over from 0. All-time stats are kept.")
+            Print("New session started; the last one is saved on the Sessions tab. All-time stats are kept.")
         end
     else
         PrintHelp()
@@ -1220,9 +1308,11 @@ local function Init()
     db.recent = db.recent or {}
     db.levels = db.levels or {}
     db.zones = db.zones or {}
-    db.version = 3
+    db.sessions = db.sessions or {}
+    db.version = 4
     runStart = GetTime()
     ns.db = db
+    if db.autoSession then ResetRun() end
     BuildGatherSpells()
 
     frame:RegisterEvent("PLAYER_LOGOUT")
