@@ -84,34 +84,3 @@ Other commands:
 lua5.1 tests/smoke.lua   # simulated kills/loot/XP against a stubbed WoW API
 luacheck .
 ```
-
-## Releases (automatic)
-
-Every pull request gets a version label from its title:
-
-| PR title starts with | Label | Version change |
-|---|---|---|
-| `feat:` | `release:minor` | 1.3.0 → 1.4.0 |
-| `fix:` or anything else | `release:patch` | 1.3.0 → 1.3.1 |
-| `feat!:` or the body says "BREAKING CHANGE" | `release:major` | 1.3.0 → 2.0.0 |
-| `docs:`, `ci:`, `chore:`, `test:` | `release:skip` | no release |
-
-To override the bump, change the label on the PR. When a PR is merged, the **Release** workflow:
-
-1. Tests the code.
-2. Tags the merge `vX.Y.Z`.
-3. Builds `KillValue-vX.Y.Z.zip` with the BigWigs packager and uploads it to CurseForge.
-4. Publishes a GitHub release with the zip and a changelog.
-
-To merge, comment `/merge` on the PR (it waits for checks to pass and then starts the release), or click Merge.
-
-### One-time setup
-
-1. **CurseForge project**: create the project on CurseForge (game: World of Warcraft, flavor: Forever) and note its **Project ID**.
-2. **API token**: get one at <https://legacy.curseforge.com/account/api-tokens>.
-3. In the GitHub repo, go to **Settings → Secrets and variables → Actions**:
-   - Under **Secrets**, add `CF_API_KEY` = your token.
-   - Under **Variables**, add `CF_PROJECT_ID` = your project ID.
-4. Go to **Settings → Actions → General → Workflow permissions** and select **Read and write permissions**.
-
-Until steps 1 to 3 are done, releases still get tagged and published on GitHub; only the CurseForge upload is skipped.
