@@ -40,7 +40,8 @@ local function AddLines(tooltip, unit)
     local added = false
 
     if p and p.source == "mob" then
-        tooltip:AddDoubleLine("|cffffd200Kill value|r", Money(p.value) .. GREY .. "  avg of " .. ns.Plural(p.kills, "kill") .. "|r", 1, 1, 1, 1, 1, 1)
+        local margin = p.margin and (GREY .. " \194\177" .. "|r" .. Money(p.margin)) or ""
+        tooltip:AddDoubleLine("|cffffd200Kill value|r", Money(p.value) .. margin .. GREY .. "  avg of " .. ns.Plural(p.kills, "kill") .. "|r", 1, 1, 1, 1, 1, 1)
         if p.coin > 0 or p.items > 0 then
             tooltip:AddDoubleLine(GREY .. "  coin / items|r", Money(p.coin) .. GREY .. "  +  |r" .. Money(p.items), 1, 1, 1, 1, 1, 1)
         end
@@ -53,6 +54,10 @@ local function AddLines(tooltip, unit)
                 tooltip:AddDoubleLine(("  %s %s%s%s|r"):format(ItemText(d), GREY, Percent(d.rate), qty),
                     "~" .. Money(d.expected), 1, 1, 1, 1, 1, 1)
             end
+        end
+        if p.gatherAvg then
+            tooltip:AddDoubleLine(("%s  + skinning / pick pocket|r"):format(GREY),
+                ("%s %s(%d%% of kills)|r"):format(Money(p.gatherAvg), GREY, p.gatherRate * 100 + 0.5), 1, 1, 1, 1, 1, 1)
         end
         tooltip:AddDoubleLine(GREY .. "  earned from these|r", Money(p.total) .. GREY .. "  best " .. "|r" .. Money(p.best), 1, 1, 1, 1, 1, 1)
         if p.perHour then

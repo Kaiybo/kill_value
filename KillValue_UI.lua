@@ -2,7 +2,7 @@
 
 local _, ns = ...
 
-local WIDTH, HEIGHT = 610, 510
+local WIDTH, HEIGHT = 640, 540
 local ROWS, ROW_H = 17, 18
 local GREY, XPC = "|cff999999", "|cff8080ff"
 local QUALITY_COLOR = {
@@ -18,6 +18,7 @@ local state = {
     mobSort = "avg", mobDesc = true, mobOffset = 0,
     lootSort = "value", lootDesc = true, lootOffset = 0, lootAll = false,
     zoneSort = "perHour", zoneDesc = true, zoneOffset = 0,
+    sessionOffset = 0,
     recentOffset = 0,
     detail = nil, dropOffset = 0,
 }
@@ -255,6 +256,7 @@ local function BuildOverview(panel)
     Row("runTotal", "Total value")
     Row("runAvg", "Average per kill")
     Row("runSplit", "Coin / items")
+    Row("runGather", "Skinning / Pick Pocket")
     Row("runHour", "Per hour played")
     Row("runFight", "Per hour fighting")
     Row("runXP", "Experience")
@@ -271,7 +273,7 @@ local function BuildOverview(panel)
     Row("allBest", "Best kill")
 
     y = y - 14
-    local resetRun = ConfirmButton(panel, "Reset since-reset totals", ns.ResetRun, 200)
+    local resetRun = ConfirmButton(panel, "New session (reset totals)", ns.ResetRun, 200)
     resetRun:SetPoint("TOPLEFT", 10, y)
     local resetAll = ConfirmButton(panel, "Reset everything", ns.ResetAll)
     resetAll:SetPoint("LEFT", resetRun, "RIGHT", 12, 0)
@@ -318,6 +320,12 @@ local function RefreshOverview(panel)
         v.runFight:SetText(GREY .. "-|r")
     end
     v.runXP:SetText(XPLine(run))
+    if (run.gathered or 0) > 0 then
+        v.runGather:SetText(("%s  %s(%s, avg %s)|r"):format(ns.Money(ns.GatherValue(run)), GREY,
+            ns.Plural(run.gathered, "time"), ns.Money(ns.GatherValue(run) / run.gathered)))
+    else
+        v.runGather:SetText(GREY .. "-|r")
+    end
 
     local need = ns.XPToLevel()
     local avgXP = ns.AverageXP(run)
@@ -461,9 +469,11 @@ local function RefreshDetail(panel)
     local p = ns.Predict(name)
     local l = panel.lines
     if p and p.source == "mob" then
-        l[1]:SetText(("Expected per kill: %s  %s= %s coin + %s items, from %s|r"):format(
-            Money(p.value), GREY, Money(p.coin), Money(p.items), ns.Plural(p.kills, "looted kill")))
-        l[2]:SetText(("Earned from this enemy: %s   %sbest single kill|r %s"):format(Money(p.total), GREY, Money(p.best)))
+        l[1]:SetText(("Expected per kill: %s%s  %s= %s coin + %s items, from %s|r"):format(
+            Money(p.value), p.margin and (GREY .. " \194\177|r" .. Money(p.margin)) or "", GREY,
+            Money(p.coin), Money(p.items), ns.Plural(p.kills, "looted kill")))
+        l[2]:SetText(("Earned from this enemy: %s   %sbest single kill|r %s%s"):format(Money(p.total), GREY, Money(p.best),
+            p.gatherAvg and (GREY .. "   skinning/pick pocket avg |r" .. Money(p.gatherAvg)) or ""))
     else
         l[1]:SetText(GREY .. "No looted kills yet.|r")
         l[2]:SetText("")
@@ -514,9 +524,20 @@ local LOOT_COLUMNS = {
 }
 
 local function LootList()
-    local bucket = state.lootAll and ns.db.total.loot or ns.db.run.loot
+    local s = state.lootAll and ns.db.total or ns.db.run
+    local merged = {}
+    for _, bucket in ipairs({ s.loot or {}, s.gatherLoot or {} }) do
+        for id, e in pairs(bucket) do
+            local m = merged[id]
+            if not m then
+                m = { name = e.name, quality = e.quality, qty = 0, times = 0, value = 0 }
+                merged[id] = m
+            end
+            m.qty, m.times, m.value = m.qty + e.qty, m.times + e.times, m.value + e.value
+        end
+    end
     local list = {}
-    for id, e in pairs(bucket or {}) do
+    for id, e in pairs(merged) do
         local each = ns.ItemPrice(id, e.qty > 0 and e.value / e.qty or 0)
         list[#list + 1] = { id = id, name = e.name or tostring(id), quality = e.quality, times = e.times,
                             qty = e.qty, value = each * e.qty, each = each }
@@ -660,6 +681,186 @@ local function BuildRecent(panel)
 end
 
 ------------------------------------------------------------------------
+-- Sessions tab
+------------------------------------------------------------------------
+
+local SESSION_COLUMNS = {
+    { label = "Started",   x = 4,   w = 110, justify = "LEFT" },
+    { label = "Played",    x = 118, w = 56,  justify = "RIGHT" },
+    { label = "Kills",     x = 178, w = 48,  justify = "RIGHT" },
+    { label = "Value",     x = 230, w = 100, justify = "RIGHT" },
+    { label = "Per hour",  x = 334, w = 96,  justify = "RIGHT" },
+    { label = "XP / hour", x = 434, w = 64,  justify = "RIGHT" },
+    { label = "Avg / kill", x = 502, w = 100, justify = "RIGHT" },
+}
+
+local function SessionDate(t)
+    if not (t and date) then return "?" end
+    return (date("%b %d %I:%M %p", t):gsub(" 0(%d)", " %1"))
+end
+
+-- The current session first, then archived ones.
+local function SessionList()
+    local run = ns.db.run
+    local list = { {
+        current = true, since = run.since, played = ns.RunSeconds(), kills = run.kills,
+        value = ns.StatsValue(run) + ns.GatherValue(run), xp = run.xp,
+    } }
+    for _, r in ipairs(ns.db.sessions or {}) do
+        list[#list + 1] = { since = r.since, played = r.played or 0, kills = r.kills, value = r.value + (r.gather or 0), xp = r.xp or 0 }
+    end
+    return list
+end
+
+local function RefreshSessions(panel)
+    local list = SessionList()
+    state.sessionOffset = Clamp(state.sessionOffset, 0, math.max(0, #list - panel.rowCount))
+    FillRows(panel, list, state.sessionOffset, function(r)
+        local hours = r.played / 3600
+        local timed = r.played >= 180
+        return {
+            (r.current and "|cff00ff00now|r " or "") .. GREY .. SessionDate(r.since) .. "|r",
+            ns.Duration(r.played), tostring(r.kills), ns.Money(r.value),
+            timed and ns.Money(r.value / hours) or GREY .. "-|r",
+            timed and XPText(r.xp / hours) or GREY .. "-|r",
+            r.kills > 0 and ns.Money(r.value / r.kills) or GREY .. "-|r",
+        }
+    end)
+    Footer(panel, list, state.sessionOffset, "sessions", "a new one starts each reset")
+end
+
+local function BuildSessions(panel)
+    BuildTable(panel, SESSION_COLUMNS, {
+        rows = ROWS - 2,
+        onScroll = function(delta)
+            state.sessionOffset = state.sessionOffset - delta * 3
+            Refresh()
+        end,
+    })
+    local new = ConfirmButton(panel, "Start a new session", ns.ResetRun, 180)
+    new:SetPoint("BOTTOMLEFT", 2, 2)
+end
+
+------------------------------------------------------------------------
+-- CSV export
+------------------------------------------------------------------------
+
+local function Gold(copper)
+    return ("%.4f"):format((copper or 0) / 10000)
+end
+
+local function CSVField(v)
+    v = tostring(v == nil and "" or v)
+    if v:find('[,"\n]') then v = '"' .. v:gsub('"', '""') .. '"' end
+    return v
+end
+
+local EXPORTS = {
+    enemies = function()
+        local out = { "enemy,level,zone,kills,avg_value_gold,margin_gold,total_gold,best_gold,xp_per_kill,seconds_per_kill,value_per_fight_hour_gold,gather_avg_gold,gather_count" }
+        for name, m in pairs(ns.db.mobs) do
+            local p = ns.Predict(name)
+            local xp = ns.MobXP(m)
+            out[#out + 1] = table.concat({
+                CSVField(name), m.level or "", CSVField(m.zone), m.kills,
+                p and Gold(p.value) or "", p and p.margin and Gold(p.margin) or "", Gold(ns.MobValue(m)), Gold(m.best),
+                xp and ("%.0f"):format(xp) or "", ns.MobKillTime(m) and ("%.1f"):format(ns.MobKillTime(m)) or "",
+                p and p.perHour and Gold(p.perHour) or "", p and p.gatherAvg and Gold(p.gatherAvg) or "", m.gathered or 0,
+            }, ",")
+        end
+        return out
+    end,
+    loot = function()
+        local out = { "item,item_id,times_looted,quantity,price_each_gold,total_gold" }
+        for id, e in pairs(ns.db.total.loot or {}) do
+            local each = ns.ItemPrice(id, e.qty > 0 and e.value / e.qty or 0)
+            out[#out + 1] = table.concat({ CSVField(e.name), tostring(id), e.times, e.qty, Gold(each), Gold(each * e.qty) }, ",")
+        end
+        return out
+    end,
+    zones = function()
+        local out = { "zone,kills,avg_value_gold,xp_per_kill,seconds_in_zone,value_per_hour_gold,xp_per_hour" }
+        for name, z in pairs(ns.db.zones or {}) do
+            local t = ns.ZoneSeconds(name)
+            out[#out + 1] = table.concat({ CSVField(name), z.kills, Gold(ns.Average(z)), ("%.0f"):format(ns.AverageXP(z)),
+                ("%.0f"):format(t), t > 0 and Gold(ns.StatsValue(z) * 3600 / t) or "", t > 0 and ("%.0f"):format((z.xp or 0) * 3600 / t) or "" }, ",")
+        end
+        return out
+    end,
+    recent = function()
+        local out = { "time,enemy,zone,value_gold,coin_gold,items,xp,dungeon,group" }
+        for _, k in ipairs(ns.db.recent) do
+            out[#out + 1] = table.concat({ k.time and date and date("%Y-%m-%d %H:%M:%S", k.time) or "", CSVField(k.name), CSVField(k.zone),
+                Gold(k.value), Gold(k.coin), k.items or 0, k.xp or "", k.inst and 1 or 0, k.group and 1 or 0 }, ",")
+        end
+        return out
+    end,
+    sessions = function()
+        local out = { "started,seconds_played,kills,value_gold,value_per_hour_gold,xp,xp_per_hour" }
+        for _, r in ipairs(SessionList()) do
+            local hours = math.max(r.played, 1) / 3600
+            out[#out + 1] = table.concat({ r.since and date and date("%Y-%m-%d %H:%M", r.since) or "", ("%.0f"):format(r.played),
+                r.kills, Gold(r.value), Gold(r.value / hours), r.xp, ("%.0f"):format(r.xp / hours) }, ",")
+        end
+        return out
+    end,
+}
+
+local exportFrame
+
+function ns.ShowExport(kind)
+    local build = EXPORTS[kind]
+    if not build then
+        ns.Print("export what? enemies, loot, zones, recent or sessions")
+        return
+    end
+    if not exportFrame then
+        local f = CreateFrame("Frame", "KillValueExportFrame", UIParent, "BackdropTemplate")
+        f:SetSize(560, 380)
+        f:SetPoint("CENTER")
+        f:SetFrameStrata("FULLSCREEN_DIALOG")
+        f:SetMovable(true)
+        f:EnableMouse(true)
+        f:RegisterForDrag("LeftButton")
+        f:SetScript("OnDragStart", f.StartMoving)
+        f:SetScript("OnDragStop", f.StopMovingOrSizing)
+        if f.SetBackdrop then
+            f:SetBackdrop({
+                bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
+                edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+                tile = true, tileSize = 32, edgeSize = 32,
+                insets = { left = 11, right = 12, top = 12, bottom = 11 },
+            })
+        end
+        f.title = Text(f, "GameFontNormalLarge")
+        f.title:SetPoint("TOP", 0, -18)
+        Text(f, "GameFontDisableSmall", "Ctrl+A, Ctrl+C to copy, then paste into a spreadsheet. Money is in gold."):SetPoint("TOP", 0, -40)
+        local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
+        close:SetPoint("TOPRIGHT", -6, -6)
+        local scroll = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
+        scroll:SetPoint("TOPLEFT", 20, -60)
+        scroll:SetPoint("BOTTOMRIGHT", -40, 20)
+        local box = CreateFrame("EditBox", nil, scroll)
+        box:SetMultiLine(true)
+        box:SetFontObject(ChatFontNormal or "GameFontHighlightSmall")
+        box:SetWidth(490)
+        box:SetAutoFocus(false)
+        box:SetScript("OnEscapePressed", function() f:Hide() end)
+        scroll:SetScrollChild(box)
+        f.box = box
+        if UISpecialFrames then table.insert(UISpecialFrames, "KillValueExportFrame") end
+        exportFrame = f
+    end
+    local text = table.concat(build(), "\n")
+    exportFrame.title:SetText("KillValue export: " .. kind)
+    exportFrame.box:SetText(text)
+    exportFrame:Show()
+    exportFrame.box:SetFocus()
+    exportFrame.box:HighlightText()
+    return text
+end
+
+------------------------------------------------------------------------
 -- Options tab
 ------------------------------------------------------------------------
 
@@ -673,6 +874,8 @@ local OPTIONS = {
     { key = "groupShare", label = "In a group, count only my share of the coin" },
     { key = "alerts", label = "Announce green-or-better and rare (under 5%) drops" },
     { key = "alertSound", label = "...with a sound" },
+    { key = "includeGather", label = "Credit Skinning / Pick Pocket loot to the enemy" },
+    { key = "autoSession", label = "Start a new session each time I log in" },
 }
 
 local function BuildOptions(panel)
@@ -682,7 +885,7 @@ local function BuildOptions(panel)
         panel.boxes[#panel.boxes + 1] = CheckBox(panel, y, o.label,
             function() if o.invert then return not ns.db[o.key] end return ns.db[o.key] end,
             function(on) if o.invert then ns.db[o.key] = not on else ns.db[o.key] = on end end)
-        y = y - 28
+        y = y - 24
     end
 
     y = y - 6
@@ -728,6 +931,15 @@ local function BuildOptions(panel)
     panel.goalBox = box
     local hint = Text(panel, "GameFontDisableSmall", "e.g. 100g - Enter to set, empty to clear")
     hint:SetPoint("LEFT", box, "RIGHT", 10, 0)
+
+    y = y - 28
+    Text(panel, "GameFontHighlight", "Export as CSV:"):SetPoint("TOPLEFT", 14, y - 4)
+    local prev
+    for _, kind in ipairs({ "enemies", "loot", "zones", "recent", "sessions" }) do
+        local b = Button(panel, kind:sub(1, 1):upper() .. kind:sub(2), 66, function() ns.ShowExport(kind) end)
+        if prev then b:SetPoint("LEFT", prev, "RIGHT", 2, 0) else b:SetPoint("TOPLEFT", 150, y) end
+        prev = b
+    end
     y = y - 4
 
     local help = Text(panel, "GameFontDisableSmall",
@@ -769,7 +981,8 @@ local TABS = {
     { key = "detail",   hidden = true,          build = BuildDetail,   refresh = RefreshDetail, parent = "mobs" },
     { key = "zones",    label = "Zones",        build = BuildZones,    refresh = RefreshZones },
     { key = "loot",     label = "Loot",         build = BuildLoot,     refresh = RefreshLoot },
-    { key = "recent",   label = "Recent kills", build = BuildRecent,   refresh = RefreshRecent },
+    { key = "recent",   label = "Recent",       build = BuildRecent,   refresh = RefreshRecent },
+    { key = "sessions", label = "Sessions",     build = BuildSessions, refresh = RefreshSessions },
     { key = "options",  label = "Options",      build = BuildOptions,  refresh = RefreshOptions },
 }
 
@@ -835,7 +1048,7 @@ local function CreateWindow()
     local prev
     for _, tab in ipairs(TABS) do
         if not tab.hidden then
-            local b = Button(f, tab.label, 90, function() SelectTab(tab.key) end)
+            local b = Button(f, tab.label, 82, function() SelectTab(tab.key) end)
             if prev then b:SetPoint("LEFT", prev, "RIGHT", 4, 0) else b:SetPoint("TOPLEFT", 22, -44) end
             tabButtons[tab.key], prev = b, b
         end

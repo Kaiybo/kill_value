@@ -108,7 +108,7 @@ GetLootSlotType = function(i) return loot[i].type end
 GetLootSlotInfo = function(i) return nil, loot[i].name, loot[i].qty, nil, loot[i].quality end
 GetLootSlotLink = function(i) return loot[i].link end
 GetLootSourceInfo = function(i) return loot[i].guid, loot[i].qty end
-local prices = { [2589] = { "Linen Cloth", 1, 13 }, [1] = { "Shiny Thing", 2, 500 } }
+local prices = { [2589] = { "Linen Cloth", 1, 13 }, [1] = { "Shiny Thing", 2, 500 }, [2318] = { "Light Leather", 1, 15 } }
 GetItemInfo = function(link)
     local id = tonumber(link:match("item:(%d+)"))
     local p = prices[id]
@@ -243,6 +243,27 @@ check(ns.ParseMoney("1g 50s") == 15000 and ns.ParseMoney("75s") == 7500, "money 
 -- Info bar feed
 check(ldbObject and ldbObject.text ~= "", "LibDataBroker feed created")
 
+
+-- Skinning a looted corpse is credited to the enemy, apart from its drops
+local killsBefore = db.mobs["Defias Thug"].kills
+fire("UNIT_SPELLCAST_SUCCEEDED", "player", "cast", 8613)
+loot = { { type = 1, name = "Light Leather", qty = 2, quality = 1, link = "|Hitem:2318::|h[Light Leather]|h",
+           guid = "Creature-0-1-2-3-116-0010" } }
+fire("LOOT_READY")
+advance(1)
+fire("LOOT_CLOSED")
+local thug = db.mobs["Defias Thug"]
+check(thug.gathered == 1 and thug.kills == killsBefore, "skinning credited without adding a kill")
+check(ns.GatherValue(db.run) == 30, "skinning value recorded: " .. ns.GatherValue(db.run))
+local pg = ns.Predict("Defias Thug")
+check(pg.gatherAvg == 30 and pg.gatherRate > 0, "tooltip prediction includes skinning")
+check(pg.margin and pg.margin > 0, "confidence range computed")
+
+-- Sessions: a reset archives the current session
+SlashCmdList.KILLVALUE("reset")
+check(#db.sessions == 1 and db.sessions[1].kills > 0 and db.run.kills == 0, "reset archives the session")
+kill("Creature-0-1-2-3-116-0012", 100, { { type = 2, name = "40 Copper", qty = 40 } })
+
 -- Tooltip
 postCall(GameTooltip)
 local tip = table.concat(tooltipLines, "\n")
@@ -262,10 +283,22 @@ check(ns.EstimateXP(10, 2, false) == 0, "XP formula, gray mob")
 -- Window: open and visit every tab (detail view needs a known enemy)
 units.target = { guid = "Creature-0-1-2-3-116-0009", name = "Defias Thug", level = 10, dead = true }
 SlashCmdList.KILLVALUE("")
-for _, tab in ipairs({ "overview", "mobs", "detail", "zones", "loot", "recent", "options" }) do
+for _, tab in ipairs({ "overview", "mobs", "detail", "zones", "loot", "recent", "sessions", "options" }) do
     ns._selectTab(tab, "Defias Thug")
 end
 check(true, "every window tab drawn without errors")
+for _, kind in ipairs({ "enemies", "loot", "zones", "recent", "sessions" }) do
+    SlashCmdList.KILLVALUE("export " .. kind)
+    local csv = ns.ShowExport(kind)
+    local header = csv:match("^[^\n]*")
+    local cols = select(2, header:gsub(",", ",")) + 1
+    for row in csv:gmatch("\n([^\n]*)") do
+        local plain = row:gsub('"[^"]*"', "x")
+        check(select(2, plain:gsub(",", ",")) + 1 == cols, "CSV " .. kind .. " row has " .. cols .. " columns")
+    end
+    if kind == "enemies" then print("  csv> " .. csv:gsub("\n", "\n  csv> ")) end
+end
+check(true, "every CSV export built without errors")
 SlashCmdList.KILLVALUE("stats")
 SlashCmdList.KILLVALUE("mobs")
 SlashCmdList.KILLVALUE("dungeons")

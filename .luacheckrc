@@ -12,7 +12,7 @@ read_globals = {
     "UISpecialFrames", "UnitCanAttack", "UnitClassification", "UnitCreatureType", "UnitExists", "UnitGUID",
     "UnitIsDead", "UnitIsPlayer", "UnitIsTapDenied", "UnitLevel", "UnitName", "UnitXP", "UnitXPMax",
     "issecretvalue", "date", "time", "Auctionator", "TSM_API", "PlaySound", "SOUNDKIT", "GetMoney",
-    "GetRealZoneText", "GetZoneText", "LibStub",
+    "GetRealZoneText", "GetZoneText", "LibStub", "ChatFontNormal",
     "GOLD_AMOUNT", "SILVER_AMOUNT", "COPPER_AMOUNT", "LOOT_MONEY_SPLIT",
     "COMBATLOG_XPGAIN_FIRSTPERSON", "COMBATLOG_XPGAIN_EXHAUSTION1", "COMBATLOG_XPGAIN_EXHAUSTION2",
     "COMBATLOG_XPGAIN_EXHAUSTION4", "COMBATLOG_XPGAIN_EXHAUSTION5", "COMBATLOG_XPGAIN_FIRSTPERSON_GROUP",
