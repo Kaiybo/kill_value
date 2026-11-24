@@ -1,0 +1,12 @@
+## Interface: 16001, 16002
+## Title: KillValue
+## Notes: What every enemy is worth: hover an enemy for its expected loot value and XP, get a message with each kill's value, and track totals, averages and per-hour rates. /kv opens the window.
+## Author: Volatile
+## Version: @project-version@
+## SavedVariablesPerCharacter: KillValueDB
+## IconTexture: Interface\Icons\INV_Misc_Coin_02
+## AddonCompartmentFunc: KillValue_ToggleWindow
+
+KillValue.lua
+KillValue_Tooltip.lua
+KillValue_UI.lua

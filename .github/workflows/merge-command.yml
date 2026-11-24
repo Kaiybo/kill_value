@@ -1,0 +1,41 @@
+# Comment "/merge" on a pull request to merge it once its checks pass.
+# The release workflow is then started for you.
+name: Merge on /merge
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+  actions: write
+
+jobs:
+  merge:
+    if: >-
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/merge') &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      PR: ${{ github.event.issue.number }}
+    steps:
+      - name: Mark ready for review
+        run: gh pr ready "$PR" || true
+      - name: Wait for checks
+        run: |
+          sleep 15
+          gh pr checks "$PR" --watch --fail-fast --interval 15 || {
+            gh pr comment "$PR" --body "Checks failed, so this wasn't merged."
+            exit 1
+          }
+      - name: Merge
+        run: gh pr merge "$PR" --squash --delete-branch
+      - name: Release
+        # Merges made by this workflow's token don't start other workflows on
+        # their own, so start the release explicitly.
+        run: gh workflow run release.yml --ref main -f pr="$PR"

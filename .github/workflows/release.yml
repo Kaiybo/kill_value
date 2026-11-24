@@ -1,0 +1,123 @@
+# Every merge to main becomes a new labelled version:
+#   1. picks the bump from the merged PR's release:* label (default: patch)
+#   2. tags the commit vX.Y.Z
+#   3. builds the addon zip with the BigWigs packager and uploads it to
+#      CurseForge (when the CF_API_KEY secret and CF_PROJECT_ID variable are set)
+#   4. publishes a GitHub release with the zip and generated notes
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number whose label decides the bump (optional)
+        required: false
+      bump:
+        description: Force a bump (major, minor, patch) instead of reading the label
+        required: false
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Work out the next version
+        id: version
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          if git tag --points-at "$sha" | grep -q '^v'; then
+            echo "This commit is already released."; echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          bump="${{ github.event.inputs.bump }}"
+          if [ -z "$bump" ]; then
+            pr="${{ github.event.inputs.pr }}"
+            if [ -n "$pr" ]; then
+              labels=$(gh pr view "$pr" --json labels -q '.labels[].name')
+            else
+              labels=$(gh api "repos/$GH_REPO/commits/$sha/pulls" -q '.[0].labels[].name' 2>/dev/null || true)
+            fi
+            case "$labels" in
+              *release:skip*)  bump=skip ;;
+              *release:major*) bump=major ;;
+              *release:minor*) bump=minor ;;
+              *)               bump=patch ;;
+            esac
+          fi
+          if [ "$bump" = skip ]; then
+            echo "PR is labelled release:skip."; echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          last=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+          last=${last:-v1.2.0}
+          IFS=. read -r major minor patch <<< "${last#v}"
+          case "$bump" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            *)     patch=$((patch + 1)) ;;
+          esac
+          next="v$major.$minor.$patch"
+          echo "$last -> $next ($bump)"
+          echo "tag=$next" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Tag (local)
+        if: steps.version.outputs.skip == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Local only for now; pushed once the package has built.
+          git tag -a "${{ steps.version.outputs.tag }}" -m "KillValue ${{ steps.version.outputs.tag }}"
+
+      - name: Release notes
+        if: steps.version.outputs.skip == 'false'
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          prev=$(git tag --list 'v*' --sort=-v:refname | sed -n 2p)
+          {
+            echo "# KillValue $tag"
+            echo
+            if [ -n "$prev" ]; then
+              git log --no-merges --pretty='- %s' "$prev..$tag"
+            else
+              git log --no-merges --pretty='- %s' "$tag"
+            fi
+          } > CHANGELOG.md
+          cat CHANGELOG.md
+
+      - name: Package and upload to CurseForge
+        if: steps.version.outputs.skip == 'false'
+        uses: BigWigsMods/packager@v2
+        with:
+          args: ${{ vars.CF_PROJECT_ID && format('-p {0}', vars.CF_PROJECT_ID) || '' }}
+        env:
+          CF_API_KEY: ${{ secrets.CF_API_KEY }}
+
+      - name: GitHub release
+        if: steps.version.outputs.skip == 'false'
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          git push origin "$tag"
+          gh release create "$tag" .release/*.zip --title "KillValue $tag" --notes-file CHANGELOG.md --verify-tag
