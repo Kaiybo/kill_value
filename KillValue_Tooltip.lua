@@ -55,6 +55,10 @@ local function AddLines(tooltip, unit)
             end
         end
         tooltip:AddDoubleLine(GREY .. "  earned from these|r", Money(p.total) .. GREY .. "  best " .. "|r" .. Money(p.best), 1, 1, 1, 1, 1, 1)
+        if p.perHour then
+            tooltip:AddDoubleLine(("%s  ~%ds of fighting per kill|r"):format(GREY, p.killTime + 0.5),
+                Money(p.perHour) .. GREY .. " /h|r", 1, 1, 1, 1, 1, 1)
+        end
         added = true
     elseif p and p.source == "level" then
         tooltip:AddDoubleLine("|cffffd200Kill value|r", "~" .. Money(p.value) .. GREY .. "  (level " .. p.level .. " avg)|r", 1, 1, 1, 1, 1, 1)
@@ -70,7 +74,9 @@ local function AddLines(tooltip, unit)
             local restedNote = (n == 0 and rested and rested > 0) and " (x2 rested)" or ""
             tooltip:AddDoubleLine(XPC .. "XP per kill|r",
                 ("%s%d|r%s  %s|r"):format(XPC, xp + 0.5, GREY, note .. restedNote), 1, 1, 1, 1, 1, 1)
-            tooltip:AddDoubleLine(GREY .. "  kills to level|r", tostring(math.ceil(need / xp)), 1, 1, 1, 1, 1, 1)
+            local perHour = ns.MobXPPerHour(mob, xp)
+            tooltip:AddDoubleLine(GREY .. "  kills to level|r", tostring(math.ceil(need / xp)) ..
+                (perHour and (GREY .. "  (" .. ("%d XP/h"):format(perHour) .. ")|r") or ""), 1, 1, 1, 1, 1, 1)
             added = true
         elseif xp == 0 then
             tooltip:AddDoubleLine(XPC .. "XP per kill|r", GREY .. "none (gray)|r", 1, 1, 1, 1, 1, 1)
@@ -93,10 +99,10 @@ local function OnUnitTooltip(tooltip)
     pcall(AddLines, tooltip, unit)
 end
 
-function ns.OnInit()
+table.insert(ns.inits, function()
     if TooltipDataProcessor and TooltipDataProcessor.AddTooltipPostCall and Enum and Enum.TooltipDataType then
         TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.Unit, OnUnitTooltip)
     elseif GameTooltip and GameTooltip.HookScript then
         GameTooltip:HookScript("OnTooltipSetUnit", OnUnitTooltip)
     end
-end
+end)

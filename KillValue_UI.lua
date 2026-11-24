@@ -2,7 +2,7 @@
 
 local _, ns = ...
 
-local WIDTH, HEIGHT = 580, 490
+local WIDTH, HEIGHT = 610, 510
 local ROWS, ROW_H = 17, 18
 local GREY, XPC = "|cff999999", "|cff8080ff"
 local QUALITY_COLOR = {
@@ -17,6 +17,7 @@ local Refresh -- defined below
 local state = {
     mobSort = "avg", mobDesc = true, mobOffset = 0,
     lootSort = "value", lootDesc = true, lootOffset = 0, lootAll = false,
+    zoneSort = "perHour", zoneDesc = true, zoneOffset = 0,
     recentOffset = 0,
     detail = nil, dropOffset = 0,
 }
@@ -255,9 +256,11 @@ local function BuildOverview(panel)
     Row("runAvg", "Average per kill")
     Row("runSplit", "Coin / items")
     Row("runHour", "Per hour played")
+    Row("runFight", "Per hour fighting")
     Row("runXP", "Experience")
     Row("runLevel", "To next level")
     Row("runBest", "Best kill")
+    Row("goal", "Gold goal")
 
     y = y - 10
     Header("All time")
@@ -294,18 +297,25 @@ local function RefreshOverview(panel)
     panel.since:SetText(since and ("(" .. since .. ")") or "")
 
     v.runKills:SetText(run.kills .. ((run.xpKills or 0) > run.kills and (GREY .. "  (" .. run.xpKills .. " gave XP)|r") or ""))
-    v.runTotal:SetText(Money(run.value))
+    v.runTotal:SetText(Money(ns.StatsValue(run)) .. (ns.UseAuction() and (GREY .. "  (auction prices)|r") or ""))
     v.runAvg:SetText(Money(Average(run)))
-    v.runSplit:SetText(Money(run.coin) .. GREY .. "  /  |r" .. Money(run.items) ..
+    v.runSplit:SetText(Money(run.coin) .. GREY .. "  /  |r" .. Money(ns.StatsItems(run)) ..
         GREY .. "  (" .. ns.Plural(run.itemCount or 0, "item") .. ")|r")
     local seconds = ns.RunSeconds()
     local hours = seconds / 3600
     if (run.kills > 0 or run.xpKills > 0) and seconds >= 180 then
         v.runHour:SetText(("%s  %s%d XP|r  %s%.0f kills  (%s played)|r"):format(
-            Money(run.value / hours), XPC, run.xp / hours, GREY,
+            Money(ns.StatsValue(run) / hours), XPC, run.xp / hours, GREY,
             math.max(run.kills, run.xpKills) / hours, ns.Duration(seconds)))
     else
         v.runHour:SetText(("%s-  (%s played)|r"):format(GREY, ns.Duration(seconds)))
+    end
+    if (run.combat or 0) >= 60 then
+        v.runFight:SetText(("%s  %s%d XP|r  %s(%s in combat, %d%% of played)|r"):format(
+            Money(ns.StatsValue(run) * 3600 / run.combat), XPC, run.xp * 3600 / run.combat, GREY,
+            ns.Duration(run.combat), math.min(100, run.combat / math.max(1, seconds) * 100)))
+    else
+        v.runFight:SetText(GREY .. "-|r")
     end
     v.runXP:SetText(XPLine(run))
 
@@ -323,9 +333,10 @@ local function RefreshOverview(panel)
         v.runLevel:SetText(need .. " XP")
     end
     v.runBest:SetText(BestText(run))
+    v.goal:SetText(ns.GoalText() or (GREY .. "none - set one on the Options tab or with /kv goal 100g|r"))
 
     v.allKills:SetText(tostring(all.kills))
-    v.allTotal:SetText(Money(all.value))
+    v.allTotal:SetText(Money(ns.StatsValue(all)))
     v.allAvg:SetText(Money(Average(all)))
     v.allXP:SetText(XPLine(all))
     v.allBest:SetText(BestText(all))
@@ -336,12 +347,13 @@ end
 ------------------------------------------------------------------------
 
 local MOB_COLUMNS = {
-    { key = "name",  label = "Enemy",      x = 4,   w = 170, justify = "LEFT" },
-    { key = "level", label = "Lvl",        x = 176, w = 30,  justify = "RIGHT" },
-    { key = "kills", label = "Kills",      x = 210, w = 44,  justify = "RIGHT" },
-    { key = "avg",   label = "Avg / kill", x = 258, w = 100, justify = "RIGHT" },
-    { key = "xp",    label = "XP",         x = 362, w = 44,  justify = "RIGHT" },
-    { key = "total", label = "Total",      x = 410, w = 112, justify = "RIGHT" },
+    { key = "name",    label = "Enemy",      x = 4,   w = 160, justify = "LEFT" },
+    { key = "level",   label = "Lvl",        x = 166, w = 28,  justify = "RIGHT" },
+    { key = "kills",   label = "Kills",      x = 198, w = 40,  justify = "RIGHT" },
+    { key = "avg",     label = "Avg / kill", x = 242, w = 88,  justify = "RIGHT" },
+    { key = "xp",      label = "XP",         x = 334, w = 40,  justify = "RIGHT" },
+    { key = "perHour", label = "/ fight hr", x = 378, w = 92,  justify = "RIGHT" },
+    { key = "total",   label = "Total",      x = 474, w = 100, justify = "RIGHT" },
 }
 
 local function MobList()
@@ -349,8 +361,11 @@ local function MobList()
     for name, m in pairs(ns.db.mobs) do
         if m.kills > 0 or (m.xpKills or 0) > 0 then
             local xp = ns.MobXP(m)
-            list[#list + 1] = { name = name, kills = m.kills, total = m.value, level = m.level or 0,
-                                avg = m.kills > 0 and m.value / m.kills or 0, xp = xp or 0 }
+            local total = ns.MobValue(m)
+            local avg = m.kills > 0 and total / m.kills or 0
+            local kt = (m.timed or 0) >= ns.MIN_TIMED and ns.MobKillTime(m)
+            list[#list + 1] = { name = name, kills = m.kills, total = total, level = m.level or 0,
+                                avg = avg, xp = xp or 0, perHour = (kt and kt > 0) and avg * 3600 / kt or 0 }
         end
     end
     Sort(list, state.mobSort, state.mobDesc, "name")
@@ -363,7 +378,8 @@ local function RefreshMobs(panel)
     state.mobOffset = Clamp(state.mobOffset, 0, math.max(0, #list - panel.rowCount))
     FillRows(panel, list, state.mobOffset, function(m)
         return { m.name, m.level > 0 and tostring(m.level) or "", tostring(m.kills),
-                 m.kills > 0 and ns.Money(m.avg) or GREY .. "-|r", XPText(m.xp), ns.Money(m.total) }
+                 m.kills > 0 and ns.Money(m.avg) or GREY .. "-|r", XPText(m.xp),
+                 m.perHour > 0 and ns.Money(m.perHour) or GREY .. "-|r", ns.Money(m.total) }
     end)
     Footer(panel, list, state.mobOffset, #list == 1 and "enemy" or "enemies", "click one for its drops")
 end
@@ -389,7 +405,7 @@ local DROP_COLUMNS = {
     { label = "Chance",     x = 218, w = 60,  justify = "RIGHT" },
     { label = "Qty",        x = 282, w = 40,  justify = "RIGHT" },
     { label = "Each",       x = 326, w = 90,  justify = "RIGHT" },
-    { label = "Per kill",   x = 420, w = 100, justify = "RIGHT" },
+    { label = "Per kill",   x = 420, w = 150, justify = "RIGHT" },
 }
 local DETAIL_ROWS = 9
 
@@ -403,7 +419,7 @@ local function BuildDetail(panel)
     back:SetPoint("TOPRIGHT", 0, 2)
 
     panel.lines = {}
-    for i = 1, 5 do
+    for i = 1, 6 do
         local fs = Text(panel, "GameFontHighlight")
         fs:SetPoint("TOPLEFT", 8, -24 - (i - 1) * ROW_H)
         fs:SetPoint("RIGHT", panel, "RIGHT", -8, 0)
@@ -412,7 +428,7 @@ local function BuildDetail(panel)
     end
 
     local tbl = CreateFrame("Frame", nil, panel)
-    tbl:SetPoint("TOPLEFT", 0, -24 - 5 * ROW_H - 8)
+    tbl:SetPoint("TOPLEFT", 0, -24 - 6 * ROW_H - 8)
     tbl:SetPoint("BOTTOMRIGHT", 0, 30)
     BuildTable(tbl, DROP_COLUMNS, {
         rows = DETAIL_ROWS,
@@ -439,7 +455,8 @@ local function RefreshDetail(panel)
         return
     end
     local Money = ns.Money
-    panel.title:SetText(name .. (mob.level and (GREY .. "  level " .. mob.level .. (mob.elite and " elite" or "") .. "|r") or ""))
+    panel.title:SetText(name .. (mob.level and (GREY .. "  level " .. mob.level .. (mob.elite and " elite" or "") .. "|r") or "") ..
+        (mob.zone and (GREY .. "  " .. mob.zone .. "|r") or ""))
 
     local p = ns.Predict(name)
     local l = panel.lines
@@ -463,6 +480,15 @@ local function RefreshDetail(panel)
         l[3]:SetText(XPC .. "XP:|r " .. GREY .. ((mob.xpKills or 0) > 0 and "none at your level" or "-") .. "|r")
         l[4]:SetText("")
     end
+    local kt = ns.MobKillTime(mob)
+    if kt then
+        local xph = ns.MobXPPerHour(mob, xp)
+        l[6]:SetText(("Fighting: ~%ds per kill  %s(%s)|r   %s%s|r"):format(kt + 0.5, GREY, ns.Plural(mob.timed, "timed kill"),
+            p and p.perHour and (Money(p.perHour) .. GREY .. " per fight hour|r") or "",
+            xph and ("   " .. XPC .. ("%d XP/h"):format(xph)) or ""))
+    else
+        l[6]:SetText(GREY .. "Fighting time: not measured yet|r")
+    end
     l[5]:SetText((mob.xpTotal or 0) > 0 and (GREY .. "Total XP from this enemy: |r" .. XPText(mob.xpTotal) ..
         GREY .. " over " .. ns.Plural(mob.xpKills or 0, "kill") .. "|r") or "")
 
@@ -484,15 +510,16 @@ local LOOT_COLUMNS = {
     { key = "times", label = "Looted",   x = 228, w = 54,  justify = "RIGHT" },
     { key = "qty",   label = "Qty",      x = 286, w = 50,  justify = "RIGHT" },
     { key = "each",  label = "Each",     x = 340, w = 80,  justify = "RIGHT" },
-    { key = "value", label = "Value",    x = 424, w = 98,  justify = "RIGHT" },
+    { key = "value", label = "Value",    x = 424, w = 150, justify = "RIGHT" },
 }
 
 local function LootList()
     local bucket = state.lootAll and ns.db.total.loot or ns.db.run.loot
     local list = {}
     for id, e in pairs(bucket or {}) do
+        local each = ns.ItemPrice(id, e.qty > 0 and e.value / e.qty or 0)
         list[#list + 1] = { id = id, name = e.name or tostring(id), quality = e.quality, times = e.times,
-                            qty = e.qty, value = e.value, each = e.qty > 0 and e.value / e.qty or 0 }
+                            qty = e.qty, value = each * e.qty, each = each }
     end
     Sort(list, state.lootSort, state.lootDesc, "name")
     return list
@@ -525,7 +552,7 @@ end
 local function RefreshLoot(panel)
     local s = state.lootAll and ns.db.total or ns.db.run
     panel.toggle:SetText(state.lootAll and "Showing: all time" or "Showing: since reset")
-    panel.summary:SetText(("%s from %s  %s+ %s coin|r"):format(ns.Money(s.items), ns.Plural(s.itemCount or 0, "item"),
+    panel.summary:SetText(("%s from %s  %s+ %s coin|r"):format(ns.Money(ns.StatsItems(s)), ns.Plural(s.itemCount or 0, "item"),
         GREY, ns.Money(s.coin)))
     local tbl = panel.table
     SortArrows(tbl, state.lootSort, state.lootDesc)
@@ -538,6 +565,65 @@ local function RefreshLoot(panel)
 end
 
 ------------------------------------------------------------------------
+-- Zones tab
+------------------------------------------------------------------------
+
+local ZONE_COLUMNS = {
+    { key = "name",    label = "Zone",       x = 4,   w = 150, justify = "LEFT" },
+    { key = "kills",   label = "Kills",      x = 158, w = 44,  justify = "RIGHT" },
+    { key = "avg",     label = "Avg / kill", x = 206, w = 88,  justify = "RIGHT" },
+    { key = "xp",      label = "XP / kill",  x = 298, w = 60,  justify = "RIGHT" },
+    { key = "perHour", label = "Per hour",   x = 362, w = 100, justify = "RIGHT" },
+    { key = "xpHour",  label = "XP / hour",  x = 466, w = 70,  justify = "RIGHT" },
+    { key = "time",    label = "Time",       x = 540, w = 34,  justify = "RIGHT" },
+}
+local ZONE_MIN_SECONDS = 300 -- don't show per-hour figures for a zone you've barely been in
+
+local function ShortTime(seconds)
+    if seconds >= 3600 then return ("%dh"):format(seconds / 3600) end
+    return ("%dm"):format(seconds / 60)
+end
+
+local function ZoneList()
+    local list = {}
+    for name, z in pairs(ns.db.zones or {}) do
+        if z.kills > 0 or (z.xpKills or 0) > 0 then
+            local t = ns.ZoneSeconds(name)
+            local value = ns.StatsValue(z)
+            local timed = t >= ZONE_MIN_SECONDS
+            list[#list + 1] = { name = name, kills = math.max(z.kills, z.xpKills or 0), avg = ns.Average(z),
+                                xp = ns.AverageXP(z), time = t,
+                                perHour = timed and value * 3600 / t or 0,
+                                xpHour = timed and (z.xp or 0) * 3600 / t or 0 }
+        end
+    end
+    Sort(list, state.zoneSort, state.zoneDesc, "name")
+    return list
+end
+
+local function RefreshZones(panel)
+    SortArrows(panel, state.zoneSort, state.zoneDesc)
+    local list = ZoneList()
+    state.zoneOffset = Clamp(state.zoneOffset, 0, math.max(0, #list - panel.rowCount))
+    FillRows(panel, list, state.zoneOffset, function(z)
+        return { z.name, tostring(z.kills), ns.Money(z.avg), XPText(z.xp),
+                 z.perHour > 0 and ns.Money(z.perHour) or GREY .. "-|r",
+                 z.xpHour > 0 and XPText(z.xpHour) or GREY .. "-|r", GREY .. ShortTime(z.time) .. "|r" }
+    end)
+    Footer(panel, list, state.zoneOffset, #list == 1 and "zone" or "zones", "per hour = all time spent in the zone")
+end
+
+local function BuildZones(panel)
+    BuildTable(panel, ZONE_COLUMNS, {
+        onHeaderClick = HeaderToggle("zoneSort", "zoneDesc", "zoneOffset", { name = true }),
+        onScroll = function(delta)
+            state.zoneOffset = state.zoneOffset - delta * 3
+            Refresh()
+        end,
+    })
+end
+
+------------------------------------------------------------------------
 -- Recent kills tab
 ------------------------------------------------------------------------
 
@@ -545,7 +631,7 @@ local RECENT_COLUMNS = {
     { label = "When",  x = 4,   w = 70,  justify = "LEFT" },
     { label = "Enemy", x = 78,  w = 250, justify = "LEFT" },
     { label = "XP",    x = 332, w = 56,  justify = "RIGHT" },
-    { label = "Value", x = 392, w = 130, justify = "RIGHT" },
+    { label = "Value", x = 392, w = 182, justify = "RIGHT" },
 }
 
 local function RefreshRecent(panel)
@@ -556,7 +642,7 @@ local function RefreshRecent(panel)
         if k.value == 0 and (k.items or 0) == 0 and (k.coin or 0) == 0 then
             value = GREY .. "no loot|r"
         else
-            value = ns.Money(k.value)
+            value = ns.Money(ns.UseAuction() and k.shown or k.value)
         end
         local tags = (k.inst and (GREY .. " [dungeon]|r") or "") .. (k.group and (GREY .. " [group]|r") or "")
         return { GREY .. Ago(k.time) .. "|r", k.name .. tags, XPText(k.xp), value }
@@ -585,6 +671,8 @@ local OPTIONS = {
     { key = "includeInstances", label = "Count dungeon and raid enemies" },
     { key = "includeGroup", label = "Count kills while in a party or raid (party loot)" },
     { key = "groupShare", label = "In a group, count only my share of the coin" },
+    { key = "alerts", label = "Announce green-or-better and rare (under 5%) drops" },
+    { key = "alertSound", label = "...with a sound" },
 }
 
 local function BuildOptions(panel)
@@ -597,7 +685,7 @@ local function BuildOptions(panel)
         y = y - 28
     end
 
-    y = y - 8
+    y = y - 6
     local label = Text(panel, "GameFontHighlight")
     label:SetPoint("TOPLEFT", 14, y - 4)
     panel.dropsLabel = label
@@ -612,11 +700,42 @@ local function BuildOptions(panel)
     end)
     plus:SetPoint("LEFT", minus, "RIGHT", 4, 0)
 
+    y = y - 28
+    panel.priceLabel = Text(panel, "GameFontHighlight")
+    panel.priceLabel:SetPoint("TOPLEFT", 14, y - 4)
+    local price = Button(panel, "Switch", 80, function()
+        ns.db.priceSource = ns.db.priceSource == "auction" and "vendor" or "auction"
+        if ns.Notify then ns.Notify() end
+        Refresh()
+    end)
+    price:SetPoint("TOPLEFT", 280, y)
+
+    y = y - 28
+    Text(panel, "GameFontHighlight", "Gold goal:"):SetPoint("TOPLEFT", 14, y - 4)
+    local box = CreateFrame("EditBox", nil, panel, "InputBoxTemplate")
+    box:SetSize(90, 20)
+    box:SetPoint("TOPLEFT", 286, y)
+    box:SetAutoFocus(false)
+    box:SetScript("OnEnterPressed", function(self)
+        local text = self:GetText() or ""
+        local copper = ns.ParseMoney(text)
+        ns.db.goal = (copper and copper > 0) and copper or nil
+        self:ClearFocus()
+        if ns.Notify then ns.Notify() end
+        Refresh()
+    end)
+    box:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    panel.goalBox = box
+    local hint = Text(panel, "GameFontDisableSmall", "e.g. 100g - Enter to set, empty to clear")
+    hint:SetPoint("LEFT", box, "RIGHT", 10, 0)
+    y = y - 4
+
     local help = Text(panel, "GameFontDisableSmall",
         "Kill value = average coin + each item's vendor price x how often it drops, learned from your own kills.\n" ..
         "Enemies you haven't killed are estimated from other enemies of the same level; XP from the 1.x formula.\n" ..
-        "Kills you don't loot still count for XP. In a group, corpses you can't loot are left out of the averages.")
-    help:SetPoint("TOPLEFT", 8, y - 40)
+        "Kills you don't loot still count for XP. In a group, corpses you can't loot are left out of the averages.\n" ..
+        "Auction prices take off the 5% cut and never go below the vendor price. 'Per fight hour' counts only time in combat.")
+    help:SetPoint("TOPLEFT", 8, y - 36)
     help:SetPoint("RIGHT", panel, "RIGHT", -8, 0)
     help:SetJustifyH("LEFT")
 end
@@ -624,6 +743,20 @@ end
 local function RefreshOptions(panel)
     for _, b in ipairs(panel.boxes) do b:Refresh() end
     panel.dropsLabel:SetText("Drops listed on enemy tooltips: " .. (ns.db.tooltipDrops or 3))
+    local source = "Vendor"
+    if ns.db.priceSource == "auction" then
+        source = ns.HasAuctionSource() and "Auction (Auctionator / TSM)" or "Auction - no Auctionator/TSM found, using vendor"
+    end
+    panel.priceLabel:SetText("Item prices: " .. source)
+    if not panel.goalBox:HasFocus() then
+        local g = ns.db.goal
+        local text = ""
+        if g then
+            local gold, silver, copper = math.floor(g / 10000), math.floor(g / 100) % 100, g % 100
+            text = (gold > 0 and (gold .. "g ") or "") .. (silver > 0 and (silver .. "s ") or "") .. (copper > 0 and (copper .. "c") or "")
+        end
+        panel.goalBox:SetText((text:gsub("%s+$", "")))
+    end
 end
 
 ------------------------------------------------------------------------
@@ -634,6 +767,7 @@ local TABS = {
     { key = "overview", label = "Overview",     build = BuildOverview, refresh = RefreshOverview },
     { key = "mobs",     label = "Enemies",      build = BuildMobs,     refresh = RefreshMobs },
     { key = "detail",   hidden = true,          build = BuildDetail,   refresh = RefreshDetail, parent = "mobs" },
+    { key = "zones",    label = "Zones",        build = BuildZones,    refresh = RefreshZones },
     { key = "loot",     label = "Loot",         build = BuildLoot,     refresh = RefreshLoot },
     { key = "recent",   label = "Recent kills", build = BuildRecent,   refresh = RefreshRecent },
     { key = "options",  label = "Options",      build = BuildOptions,  refresh = RefreshOptions },
@@ -701,7 +835,7 @@ local function CreateWindow()
     local prev
     for _, tab in ipairs(TABS) do
         if not tab.hidden then
-            local b = Button(f, tab.label, 100, function() SelectTab(tab.key) end)
+            local b = Button(f, tab.label, 90, function() SelectTab(tab.key) end)
             if prev then b:SetPoint("LEFT", prev, "RIGHT", 4, 0) else b:SetPoint("TOPLEFT", 22, -44) end
             tabButtons[tab.key], prev = b, b
         end

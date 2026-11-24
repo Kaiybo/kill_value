@@ -9,7 +9,8 @@ A World of Warcraft: Forever addon that tells you what every enemy is worth, in 
 - **Kill value**: the expected vendor value of one kill. That's the average coin plus each item's sell price × how often it drops × how many usually drop.
 - The coin / items split, and the most valuable drops with their drop chance and what each adds per kill.
 - What you've earned from that enemy so far, and your best single kill of it.
-- **XP per kill** at your current level and **kills to level**.
+- **Fight time:** seconds of combat per kill and **value per hour of fighting**.
+- **XP per kill** at your current level, **kills to level** and **XP per hour of fighting**.
 
 The numbers come from your own kills. For an enemy you haven't killed yet, the value is estimated from other enemies of the same level, and the XP from the 1.x experience formula.
 
@@ -20,12 +21,15 @@ KillValue: Defias Thug: 5s 51c  (25c coin + 5s 26c in 3 items)  +100 XP
    this enemy: 11s 2c over 4 kills, avg 2s 75c  - all kills: total 3g 12s, avg 31s over 101 kills since reset
 ```
 
-**The window** (`/kv`, or the addon menu by the minimap) has five tabs:
+**Notable drops** are announced, optionally with a sound. That covers anything green or better, and anything rarer than 5% once you've killed that enemy at least 10 times.
+
+**The window** (`/kv`, or the addon menu by the minimap) has six tabs:
 
 | Tab | Shows |
 |---|---|
-| Overview | Kills, total value, average per kill, coin/items split, per-hour value, XP and kill rates, XP and time to level, best kill. Shows since-reset and all-time figures, with reset buttons. |
-| Enemies | Every enemy you've killed: level, kills, average value, XP per kill, total earned. Click a heading to sort. Click an enemy to see its drop table (chance, average quantity, price each, value per kill) or reset that one enemy. |
+| Overview | Kills, total value, average per kill, coin/items split, value/XP/kills per hour played and per hour of fighting, XP and time to level, best kill, gold goal progress. Shows since-reset and all-time figures, with reset buttons. |
+| Enemies | Every enemy you've killed: level, kills, average value, XP per kill, value per fight hour, total earned. Click a heading to sort. Click an enemy to see its zone, fight time, drop table (chance, average quantity, price each, value per kill) or reset that one enemy. |
+| Zones | Kills, average value and XP per kill, and **value and XP per hour spent in each zone** (downtime included), to show where farming pays best. |
 | Loot | Every item you've looted, since reset or all time: times looted, quantity, price each, total value. |
 | Recent kills | Your last 200 kills with XP and value, tagged `[dungeon]` / `[group]`. |
 | Options | Every setting listed below. |
@@ -41,11 +45,21 @@ KillValue: Defias Thug: 5s 51c  (25c coin + 5s 26c in 3 items)  +100 XP
 | Count dungeon and raid enemies | on | `/kv dungeons` |
 | Count kills while in a party or raid (party loot) | on | `/kv group` |
 | In a group, count only your share of the coin | on | `/kv share` |
+| Announce green-or-better and rare drops | on | `/kv alerts` |
+| …with a sound | off | `/kv sound` |
+| Item prices: vendor, or auction via Auctionator / TSM | vendor | `/kv price vendor` / `/kv price auction` |
+| Gold goal | none | `/kv goal 100g` / `/kv goal clear` |
 
 Other commands:
 
 - `/kv stats` prints totals, averages, per-hour rates and kills to level in chat.
 - `/kv mobs [n]` lists the best-paying enemies.
+
+**Auction prices:** with Auctionator or TradeSkillMaster installed, `/kv price auction` values items at auction price minus the 5% auction house cut, and never below their vendor price. Everything is recorded at vendor price and re-valued when it's displayed, so you can switch back and forth freely.
+
+**Gold goal:** `/kv goal 100g` shows your current gold against the goal, plus roughly how many kills and how much playtime are left at your current pace.
+
+**Info bars and minimap:** if you use an info-bar addon (Titan Panel, ChocolateBar, ElvUI datatexts), KillValue adds a gold-per-hour readout to it with a summary tooltip. If LibDBIcon is loaded, you also get a minimap button.
 - `/kv reset` restarts the since-reset totals and keeps all-time stats.
 - `/kv reset mob <name>` forgets one enemy's stats.
 - `/kv reset all` clears everything.

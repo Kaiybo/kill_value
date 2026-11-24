@@ -9,4 +9,5 @@
 
 KillValue.lua
 KillValue_Tooltip.lua
+KillValue_Broker.lua
 KillValue_UI.lua

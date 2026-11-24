@@ -89,6 +89,17 @@ IsInInstance = function() return false, "none" end
 IsInGroup = function() return false end
 CanLootUnit = function() return true end
 GetSpellInfo = function(id) return "Spell" .. id end
+local zone = "Westfall"
+GetRealZoneText = function() return zone end
+GetMoney = function() return 120000 end
+local sounds = 0
+PlaySound = function() sounds = sounds + 1 end
+local ldbObject
+LibStub = function(name, silent)
+    if name == "LibDataBroker-1.1" then
+        return { NewDataObject = function(_, _, obj) ldbObject = obj; return obj end }
+    end
+end
 
 -- Loot window contents
 local loot = {}
@@ -130,10 +141,13 @@ check(n == "Defias Thug" and xp == 125, "XP message parsed with rested bonus")
 check(T.ParseCoinText("1 Gold\n2 Silver\n3 Copper") == 10203, "coin text parsed")
 
 -- Kill 1: coin + 2 cloth + 1 shiny
-local function kill(guid, xpGain, slots)
+local function kill(guid, xpGain, slots, fightSeconds)
     units.target.guid = guid
+    fire("PLAYER_REGEN_DISABLED")
+    advance(fightSeconds or 10)
     fire("CHAT_MSG_COMBAT_XP_GAIN", "Defias Thug dies, you gain " .. xpGain .. " experience.")
     fire("PARTY_KILL", "Player-1", guid)
+    fire("PLAYER_REGEN_ENABLED")
     loot = slots
     for _, s in ipairs(loot) do s.guid = guid end
     fire("LOOT_READY")
@@ -187,6 +201,48 @@ fire("LOOT_CLOSED")
 check(db.recent[1].coin == 50, "group share counted: " .. tostring(db.recent[1].coin))
 IsInGroup = function() return false end
 
+
+-- Fight timing and per-hour rates
+kill("Creature-0-1-2-3-116-0010", 100, { { type = 2, name = "40 Copper", qty = 40 } }, 20)
+local m2 = db.mobs["Defias Thug"]
+check(m2.timed >= 3 and m2.combat > 0, "fight time recorded per enemy")
+local p2 = ns.Predict("Defias Thug")
+check(p2.killTime and p2.perHour and p2.perHour > 0, "per fight hour value computed")
+
+-- Zones
+check(db.zones.Westfall and db.zones.Westfall.kills >= 3 and db.zones.Westfall.xp > 0, "zone stats recorded")
+advance(400)
+check(ns.ZoneSeconds("Westfall") > 300, "zone time tracked")
+
+-- Notable drop announcement (green item)
+local before = #lines
+db.alertSound = true
+kill("Creature-0-1-2-3-116-0011", 100, {
+    { type = 1, name = "Shiny Thing", qty = 1, quality = 2, link = "|Hitem:1::|h[Shiny Thing]|h" },
+})
+local announced = false
+for i = before + 1, #lines do if lines[i]:find("Notable drop") then announced = true end end
+check(announced and sounds == 1, "green drop announced with sound")
+
+-- Auction prices (fake Auctionator)
+local vendorAvg = ns.Average(db.run)
+Auctionator = { API = { v1 = { GetAuctionPriceByItemID = function(_, id) if id == 1 then return 10000 end end } } }
+SlashCmdList.KILLVALUE("price auction")
+check(ns.UseAuction() and ns.HasAuctionSource(), "auction price source on")
+check(ns.ItemPrice(1, 500) == 9500, "auction price minus 5% cut")
+check(ns.ItemPrice(2589, 13) == 13, "falls back to vendor without AH data")
+check(ns.Average(db.run) > vendorAvg, "averages re-valued at auction price")
+SlashCmdList.KILLVALUE("price vendor")
+check(math.abs(ns.Average(db.run) - vendorAvg) < 0.01, "back to vendor values")
+
+-- Goal
+SlashCmdList.KILLVALUE("goal 50g")
+check(db.goal == 500000 and ns.GoalText():find("kills"), "gold goal with kills estimate")
+check(ns.ParseMoney("1g 50s") == 15000 and ns.ParseMoney("75s") == 7500, "money parsing")
+
+-- Info bar feed
+check(ldbObject and ldbObject.text ~= "", "LibDataBroker feed created")
+
 -- Tooltip
 postCall(GameTooltip)
 local tip = table.concat(tooltipLines, "\n")
@@ -206,7 +262,7 @@ check(ns.EstimateXP(10, 2, false) == 0, "XP formula, gray mob")
 -- Window: open and visit every tab (detail view needs a known enemy)
 units.target = { guid = "Creature-0-1-2-3-116-0009", name = "Defias Thug", level = 10, dead = true }
 SlashCmdList.KILLVALUE("")
-for _, tab in ipairs({ "overview", "mobs", "detail", "loot", "recent", "options" }) do
+for _, tab in ipairs({ "overview", "mobs", "detail", "zones", "loot", "recent", "options" }) do
     ns._selectTab(tab, "Defias Thug")
 end
 check(true, "every window tab drawn without errors")

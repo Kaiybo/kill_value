@@ -10,6 +10,7 @@
 -- Type /kv for the window, /kv help for commands.
 
 local ADDON_NAME, ns = ... -- ns is shared with the other files
+ns.inits = {} -- setup functions the other files add, run once saved variables are loaded
 
 local PREFIX = "|cffffd200KillValue:|r "
 local DEFAULTS = {
@@ -21,6 +22,10 @@ local DEFAULTS = {
     tooltip = true,          -- add kill value / XP lines to enemy tooltips
     tooltipDrops = 3,        -- how many top drops to list in the tooltip
     verbose = true,          -- per-kill message also shows this enemy's totals
+    priceSource = "vendor",  -- "vendor" or "auction" (Auctionator / TSM, when installed)
+    alerts = true,           -- announce green-or-better and rare drops
+    alertQuality = 2,        -- 2 = uncommon (green)
+    alertSound = false,
 }
 
 local EMPTY_CHECK_DELAY = 2 -- seconds after a kill before asking "does this corpse have loot?"
@@ -40,6 +45,7 @@ local lastGather = 0
 local gatherSpells = {}
 local lastShare          -- { ratio, t } from the most recent coin split message
 local lootCoinSeen = 0   -- coin in the loot window currently open
+local fight              -- { start, kills } while you're in combat
 local shareWaiters = {}
 
 ------------------------------------------------------------------------
@@ -243,7 +249,7 @@ end
 -- xp/xpKills count every kill that gave experience, looted or not.
 local function NewStats()
     return { kills = 0, value = 0, coin = 0, items = 0, itemCount = 0, best = 0,
-             xp = 0, xpKills = 0, loot = {} }
+             xp = 0, xpKills = 0, combat = 0, loot = {} }
 end
 
 local function Upgrade(s)
@@ -263,7 +269,7 @@ local function NewRun()
 end
 
 local function NewMob()
-    return { kills = 0, value = 0, coin = 0, items = 0, best = 0, drops = {}, xpAt = {} }
+    return { kills = 0, value = 0, coin = 0, items = 0, best = 0, drops = {}, xpAt = {}, combat = 0, timed = 0 }
 end
 
 local function GetMob(name, create)
@@ -275,20 +281,47 @@ local function GetMob(name, create)
     if mob then
         mob.coin, mob.items, mob.best = mob.coin or 0, mob.items or 0, mob.best or 0
         mob.drops, mob.xpAt = mob.drops or {}, mob.xpAt or {}
+        mob.combat, mob.timed = mob.combat or 0, mob.timed or 0
     end
     return mob
 end
 
+-- Zones keep the same stats as the totals, plus time spent there.
+local function GetZone(name)
+    if not name then return nil end
+    local z = db.zones[name]
+    if not z then
+        z = NewStats()
+        z.time = 0
+        db.zones[name] = z
+    end
+    return z
+end
+
+local function ZoneName()
+    return Safe(GetRealZoneText) or Safe(GetZoneText)
+end
+
+local zoneNow, zoneSince -- zone you're in and since when (GetTime)
+
+local function ZoneTick()
+    local now = GetTime()
+    if zoneNow and zoneSince then
+        local z = GetZone(zoneNow)
+        z.time = (z.time or 0) + (now - zoneSince)
+    end
+    zoneNow, zoneSince = ZoneName(), now
+end
+
+local function ZoneSeconds(name)
+    local z = db.zones[name]
+    local t = z and z.time or 0
+    if name == zoneNow and zoneSince then t = t + (GetTime() - zoneSince) end
+    return t
+end
+
 local function RunSeconds()
     return db.run.played + (GetTime() - runStart)
-end
-
-local function Average(s)
-    return s.kills > 0 and s.value / s.kills or 0
-end
-
-local function AverageXP(s)
-    return (s.xpKills or 0) > 0 and s.xp / s.xpKills or 0
 end
 
 local function Plural(n, word)
@@ -307,6 +340,97 @@ local function AddLoot(bucket, item)
     e.qty = e.qty + item.qty
     e.times = e.times + 1
     e.value = e.value + (item.price or 0) * item.qty
+end
+
+-- Prices --------------------------------------------------------------
+--
+-- Everything is recorded at vendor price. With the "auction" price source,
+-- items are re-valued at display time from Auctionator or TradeSkillMaster
+-- (minus the 5% auction house cut), never below their vendor price.
+
+local AH_CACHE_SECONDS = 60
+local ahCache = {}
+
+local function AuctionPrice(id)
+    if type(id) ~= "number" then return nil end
+    local c = ahCache[id]
+    if c and GetTime() - c.t < AH_CACHE_SECONDS then return c.p end
+    local price
+    local api = Auctionator and Auctionator.API and Auctionator.API.v1
+    if api and api.GetAuctionPriceByItemID then
+        local ok, p = pcall(api.GetAuctionPriceByItemID, ADDON_NAME, id)
+        if ok and type(p) == "number" and p > 0 then price = p end
+    end
+    if not price and TSM_API and TSM_API.GetCustomPriceValue then
+        local ok, p = pcall(TSM_API.GetCustomPriceValue, "dbmarket", "i:" .. id)
+        if ok and type(p) == "number" and p > 0 then price = p end
+    end
+    ahCache[id] = { p = price, t = GetTime() }
+    return price
+end
+
+local function HasAuctionSource()
+    local api = Auctionator and Auctionator.API and Auctionator.API.v1
+    return (api and api.GetAuctionPriceByItemID or (TSM_API and TSM_API.GetCustomPriceValue)) and true or false
+end
+
+local function UseAuction()
+    return db.priceSource == "auction"
+end
+
+-- Price of one item under the chosen price source.
+local function ItemPrice(id, vendor)
+    vendor = vendor or 0
+    if not UseAuction() then return vendor end
+    local ah = AuctionPrice(id)
+    if not ah then return vendor end
+    return math.max(math.floor(ah * 0.95), vendor)
+end
+
+local function LootValue(bucket)
+    local total = 0
+    for id, e in pairs(bucket or {}) do
+        local vendorEach = e.qty > 0 and e.value / e.qty or 0
+        total = total + ItemPrice(id, vendorEach) * e.qty
+    end
+    return total
+end
+
+-- Total value of a stats bucket under the chosen price source. Anything
+-- recorded before item details were kept stays at its recorded value.
+local function StatsValue(s)
+    if not UseAuction() then return s.value end
+    local recordedItems = 0
+    for _, e in pairs(s.loot or {}) do recordedItems = recordedItems + e.value end
+    return s.value - recordedItems + LootValue(s.loot)
+end
+
+local function StatsItems(s)
+    return StatsValue(s) - s.coin
+end
+
+local function MobValue(mob)
+    if not UseAuction() then return mob.value end
+    local recorded, now = 0, 0
+    for id, d in pairs(mob.drops or {}) do
+        recorded = recorded + (d.price or 0) * d.qty
+        now = now + ItemPrice(id, d.price) * d.qty
+    end
+    return mob.value - recorded + now
+end
+
+local function Average(s)
+    return s.kills > 0 and StatsValue(s) / s.kills or 0
+end
+
+local function AverageXP(s)
+    return (s.xpKills or 0) > 0 and s.xp / s.xpKills or 0
+end
+
+-- Seconds of combat per kill, from fights where it died.
+local function MobKillTime(mob)
+    if not mob or (mob.timed or 0) < 1 then return nil end
+    return mob.combat / mob.timed
 end
 
 -- Experience ----------------------------------------------------------
@@ -364,7 +488,7 @@ local function RecordXP(name, xp)
     table.insert(xpLog, 1, { name = name, xp = xp, t = GetTime() })
     while #xpLog > XP_LOG_MAX do table.remove(xpLog) end
 
-    for _, s in ipairs({ db.run, db.total }) do
+    for _, s in ipairs({ db.run, db.total, GetZone(ZoneName()) }) do
         s.xp = s.xp + xp
         s.xpKills = s.xpKills + 1
     end
@@ -405,8 +529,32 @@ end
 ------------------------------------------------------------------------
 
 local function MobLine(mob)
+    local value = MobValue(mob)
     return ("|cff999999this enemy:|r %s |cff999999over %s, avg|r %s"):format(
-        Money(mob.value), Plural(mob.kills, "kill"), Money(mob.value / mob.kills))
+        Money(value), Plural(mob.kills, "kill"), Money(value / mob.kills))
+end
+
+local NOTABLE_RATE = 0.05   -- drops rarer than this (after NOTABLE_KILLS kills) are announced
+local NOTABLE_KILLS = 10
+
+local function Announce(name, mob, items)
+    if not db.alerts then return end
+    local any = false
+    for _, item in ipairs(items) do
+        local d = mob.drops[item.id or item.link]
+        local rate = d and d.times / mob.kills or 1
+        local rare = mob.kills >= NOTABLE_KILLS and rate <= NOTABLE_RATE
+        if (item.quality or 0) >= (db.alertQuality or 2) or rare then
+            any = true
+            Print(("|cffff8000Notable drop:|r %s%s from %s - worth %s%s"):format(
+                item.link or item.name or "?", item.qty > 1 and ("x" .. item.qty) or "", name,
+                Money(ItemPrice(item.id, item.price) * item.qty),
+                mob.kills >= NOTABLE_KILLS and (" |cff999999(%.1f%% drop chance)|r"):format(rate * 100) or ""))
+        end
+    end
+    if any and db.alertSound and PlaySound then
+        pcall(PlaySound, SOUNDKIT and SOUNDKIT.RAID_WARNING or 8959)
+    end
 end
 
 local function FinishKill(rec, coin, itemValue, itemCount, items)
@@ -419,7 +567,7 @@ local function FinishKill(rec, coin, itemValue, itemCount, items)
     local name = rec.name or "Unknown enemy"
     items = items or {}
 
-    for _, s in ipairs({ db.run, db.total }) do
+    for _, s in ipairs({ db.run, db.total, GetZone(rec.zone) }) do
         s.kills = s.kills + 1
         s.value = s.value + value
         s.coin = s.coin + coin
@@ -437,6 +585,7 @@ local function FinishKill(rec, coin, itemValue, itemCount, items)
     if value > mob.best then mob.best = value end
     if rec.level then mob.level = rec.level end
     if rec.elite ~= nil then mob.elite = rec.elite end
+    if rec.zone then mob.zone = rec.zone end
     mob.last = Now()
     -- Count each item once per kill for its drop rate, even if it took two slots.
     local seen = {}
@@ -462,31 +611,41 @@ local function FinishKill(rec, coin, itemValue, itemCount, items)
         lv.kills, lv.value = lv.kills + 1, lv.value + value
     end
 
+    -- What the kill is worth under the chosen price source.
+    local shownItems = 0
+    for _, item in ipairs(items) do shownItems = shownItems + ItemPrice(item.id, item.price) * item.qty end
+    local shown = coin + shownItems
+
     local xp = ClaimXP(name)
-    table.insert(db.recent, 1, { name = name, value = value, coin = coin, items = itemCount, xp = xp,
+    table.insert(db.recent, 1, { name = name, value = value, shown = UseAuction() and shown or nil,
+                                 coin = coin, items = itemCount, xp = xp, zone = rec.zone,
                                  time = Now(), inst = rec.inst or nil, group = rec.group or nil })
     while #db.recent > RECENT_MAX do table.remove(db.recent) end
     Notify()
 
-    if db.quiet then return end
+    if db.quiet then
+        Announce(name, mob, items)
+        return
+    end
 
     local detail
     if empty then
         detail = "|cff999999no loot|r"
     elseif coin > 0 and itemCount > 0 then
-        detail = ("%s  |cff999999(%s coin + %s in %s)|r"):format(Money(value), Money(coin), Money(itemValue), Plural(itemCount, "item"))
+        detail = ("%s  |cff999999(%s coin + %s in %s)|r"):format(Money(shown), Money(coin), Money(shownItems), Plural(itemCount, "item"))
     elseif itemCount > 0 then
-        detail = ("%s  |cff999999(%s)|r"):format(Money(value), Plural(itemCount, "item"))
+        detail = ("%s  |cff999999(%s)|r"):format(Money(shown), Plural(itemCount, "item"))
     else
-        detail = ("%s  |cff999999(coin)|r"):format(Money(value))
+        detail = ("%s  |cff999999(coin)|r"):format(Money(shown))
     end
     if xp then detail = detail .. ("  |cff8080ff+%d XP|r"):format(xp) end
 
     Print(("%s: %s"):format(name, detail))
     if db.verbose then
         Print(("   %s  |cff999999- all kills: total|r %s|cff999999, avg|r %s |cff999999over %s since reset|r"):format(
-            MobLine(mob), Money(db.run.value), Money(Average(db.run)), Plural(db.run.kills, "kill")))
+            MobLine(mob), Money(StatsValue(db.run)), Money(Average(db.run)), Plural(db.run.kills, "kill")))
     end
+    Announce(name, mob, items)
 end
 
 ------------------------------------------------------------------------
@@ -504,7 +663,7 @@ end
 
 local function NewKill(guid, unit)
     local rec = { t = GetTime(), name = UnitNameSafe(unit), state = "pending",
-                  inst = InInstance(), group = InGroup() }
+                  inst = InInstance(), group = InGroup(), zone = ZoneName() }
     if unit then
         local lvl = Safe(UnitLevel, unit)
         if lvl and lvl > 0 then rec.level = lvl end
@@ -547,7 +706,32 @@ local function OnPartyKill(_, targetGUID)
         rec.state = "ignored"
         return
     end
+    if fight and not rec.blocked then fight.kills[#fight.kills + 1] = rec end
     C_Timer.After(EMPTY_CHECK_DELAY, function() CheckEmpty(guid, rec, 1) end)
+end
+
+-- Fight timing: the length of each fight is shared out between the enemies
+-- that died in it, giving seconds of combat per kill for each enemy and
+-- value / XP per hour of fighting.
+local function OnCombatStart()
+    fight = { start = GetTime(), kills = {} }
+end
+
+local function OnCombatEnd()
+    local f = fight
+    fight = nil
+    if not f or #f.kills == 0 then return end
+    local seconds = GetTime() - f.start
+    if seconds <= 0 or seconds > 600 then return end -- ignore nonsense (e.g. a disconnect)
+    local each = seconds / #f.kills
+    for _, s in ipairs({ db.run, db.total }) do s.combat = (s.combat or 0) + seconds end
+    for _, rec in ipairs(f.kills) do
+        if rec.name then
+            local mob = GetMob(rec.name, true)
+            mob.combat, mob.timed = mob.combat + each, mob.timed + 1
+        end
+    end
+    Notify()
 end
 
 ------------------------------------------------------------------------
@@ -733,26 +917,34 @@ end
 -- What a kill of this enemy is expected to be worth, broken into coin and
 -- each item's value x how often it drops. Falls back to the average of
 -- other enemies of the same level when you haven't killed this one.
+local MIN_TIMED = 3 -- timed kills needed before showing per-hour rates for an enemy
+
 local function Predict(name, level)
     local mob = name and db.mobs[name]
     if mob and mob.kills > 0 then
         local drops = {}
         for id, d in pairs(mob.drops or {}) do
+            local price = ItemPrice(id, d.price)
             local rate = d.times / mob.kills
             local perDrop = d.times > 0 and d.qty / d.times or 1
-            local expected = (d.price or 0) * d.qty / mob.kills
             drops[#drops + 1] = { id = id, name = d.name, quality = d.quality, rate = rate,
-                                  qty = perDrop, price = d.price or 0, expected = expected }
+                                  qty = perDrop, price = price, expected = price * d.qty / mob.kills }
         end
         table.sort(drops, function(a, b)
             if a.expected == b.expected then return (a.rate or 0) > (b.rate or 0) end
             return a.expected > b.expected
         end)
-        return {
-            source = "mob", kills = mob.kills, value = mob.value / mob.kills,
-            coin = (mob.coin or 0) / mob.kills, items = (mob.items or 0) / mob.kills,
-            total = mob.value, best = mob.best, drops = drops,
+        local total = MobValue(mob)
+        local p = {
+            source = "mob", kills = mob.kills, value = total / mob.kills,
+            coin = (mob.coin or 0) / mob.kills, items = (total - (mob.coin or 0)) / mob.kills,
+            total = total, best = mob.best, drops = drops,
         }
+        local kt = (mob.timed or 0) >= MIN_TIMED and MobKillTime(mob)
+        if kt and kt > 0 then
+            p.killTime, p.perHour = kt, p.value * 3600 / kt
+        end
+        return p
     end
     level = level or (mob and mob.level)
     local lv = level and db.levels[level]
@@ -761,6 +953,15 @@ local function Predict(name, level)
     end
 end
 
+-- XP per hour of fighting this enemy, at your level.
+local function MobXPPerHour(mob, xp)
+    local kt = mob and (mob.timed or 0) >= MIN_TIMED and MobKillTime(mob)
+    if kt and kt > 0 and xp and xp > 0 then return xp * 3600 / kt end
+end
+
+ns.MobKillTime, ns.MobXPPerHour, ns.MIN_TIMED = MobKillTime, MobXPPerHour, MIN_TIMED
+ns.StatsValue, ns.StatsItems, ns.MobValue, ns.ItemPrice = StatsValue, StatsItems, MobValue, ItemPrice
+ns.HasAuctionSource, ns.UseAuction, ns.ZoneSeconds = HasAuctionSource, UseAuction, ZoneSeconds
 ns.Predict, ns.MobXP, ns.XPToLevel, ns.EstimateXP = Predict, MobXP, XPToLevel, EstimateXP
 ns.Readable, ns.Safe, ns.IsJunkCreature = Readable, Safe, IsJunkCreature
 
@@ -774,7 +975,8 @@ local function ResetRun()
 end
 
 local function ResetAll()
-    db.total, db.mobs, db.recent, db.levels = NewStats(), {}, {}, {}
+    db.total, db.mobs, db.recent, db.levels, db.zones = NewStats(), {}, {}, {}, {}
+    zoneNow, zoneSince = ZoneName(), GetTime()
     ResetRun()
 end
 
@@ -789,20 +991,54 @@ end
 -- Slash commands
 ------------------------------------------------------------------------
 
+-- Gold goal ------------------------------------------------------------
+
+local function Duration(seconds)
+    local h, m = math.floor(seconds / 3600), math.floor(seconds / 60) % 60
+    if h >= 48 then return ("%dd %dh"):format(h / 24, h % 24) end
+    return h > 0 and ("%dh %dm"):format(h, m) or ("%dm"):format(m)
+end
+
+-- "50g", "1g 50s", "75s", "120" (gold) -> copper
+local function ParseMoney(text)
+    text = (text or ""):lower()
+    local g, sv, c = text:match("(%d+)%s*g"), text:match("(%d+)%s*s"), text:match("(%d+)%s*c")
+    if not (g or sv or c) then
+        local n = tonumber(text)
+        return n and math.floor(n * 10000) or nil
+    end
+    return (tonumber(g) or 0) * 10000 + (tonumber(sv) or 0) * 100 + (tonumber(c) or 0)
+end
+
+local function PerHour()
+    local seconds = RunSeconds()
+    if seconds < 180 then return nil end
+    return StatsValue(db.run) / (seconds / 3600)
+end
+
+-- "12g of 50g (24%) - ~430 kills, ~3h 10m at this pace"
+local function GoalText()
+    if not db.goal or db.goal <= 0 then return nil end
+    local have = Safe(GetMoney) or 0
+    local text = ("%s of %s (%d%%)"):format(Money(have), Money(db.goal), math.min(100, have / db.goal * 100))
+    local left = db.goal - have
+    if left <= 0 then return text .. " |cff00ff00- reached!|r" end
+    local avg, rate = Average(db.run), PerHour()
+    if avg > 0 then text = text .. (" - ~%d kills"):format(math.ceil(left / avg)) end
+    if rate and rate > 0 then text = text .. (", ~%s at this pace"):format(Duration(left / rate * 3600)) end
+    return text
+end
+
 local function StatsLine(label, s)
     if s.kills == 0 and (s.xpKills or 0) == 0 then return label .. ": no kills yet." end
     local line = ("%s: %s, %s total |cff999999(%s coin, %s items)|r - |cffffffffavg %s per kill|r"):format(
-        label, Plural(s.kills, "kill"), Money(s.value), Money(s.coin), Money(s.items), Money(Average(s)))
+        label, Plural(s.kills, "kill"), Money(StatsValue(s)), Money(s.coin), Money(StatsItems(s)), Money(Average(s)))
     if (s.xpKills or 0) > 0 then
         line = line .. (" |cff8080ff- %d XP, avg %d per kill|r"):format(s.xp, AverageXP(s))
     end
     return line
 end
 
-local function Duration(seconds)
-    local h, m = math.floor(seconds / 3600), math.floor(seconds / 60) % 60
-    return h > 0 and ("%dh %dm"):format(h, m) or ("%dm"):format(m)
-end
 
 local function SinceText()
     local since = db.run.since
@@ -820,6 +1056,7 @@ end
 ns.Money, ns.Average, ns.AverageXP, ns.Plural, ns.Duration = Money, Average, AverageXP, Plural, Duration
 ns.RunSeconds, ns.SinceText, ns.ResetRun, ns.ResetAll, ns.ResetMob = RunSeconds, SinceText, ResetRun, ResetAll, ResetMob
 ns.Print, ns.Notify = Print, Notify
+ns.GoalText, ns.ParseMoney, ns.PerHour = GoalText, ParseMoney, PerHour
 
 local function PrintSummary()
     Print(StatsLine(SinceLabel(), db.run))
@@ -827,13 +1064,19 @@ local function PrintSummary()
     if seconds >= 180 and (db.run.kills > 0 or db.run.xpKills > 0) then
         local hours = seconds / 3600
         Print(("   per hour: %s, %d XP, %.0f kills  |cff999999(%s played)|r"):format(
-            Money(db.run.value / hours), db.run.xp / hours, math.max(db.run.kills, db.run.xpKills) / hours, Duration(seconds)))
+            Money(StatsValue(db.run) / hours), db.run.xp / hours, math.max(db.run.kills, db.run.xpKills) / hours, Duration(seconds)))
     end
     local need = XPToLevel()
     local avgXP = AverageXP(db.run)
     if need and avgXP > 0 then
         Print(("   about %d more kills to level (%d XP to go)"):format(math.ceil(need / avgXP), need))
     end
+    if (db.run.combat or 0) >= 60 then
+        Print(("   per hour of fighting: %s, %d XP  |cff999999(%s in combat)|r"):format(
+            Money(StatsValue(db.run) * 3600 / db.run.combat), db.run.xp * 3600 / db.run.combat, Duration(db.run.combat)))
+    end
+    local goal = ns.GoalText and ns.GoalText()
+    if goal then Print("   goal: " .. goal) end
     Print(StatsLine("All time", db.total))
     if db.total.bestName then
         Print(("   best single kill: %s (%s)"):format(Money(db.total.best), db.total.bestName))
@@ -880,6 +1123,8 @@ local TOGGLES = {
     share = { key = "groupShare", on = "In a group, only your share of the coin is counted.", off = "In a group, the corpse's full coin is counted." },
     tooltip = { key = "tooltip", on = "Enemy tooltips show kill value and XP.", off = "Enemy tooltips left alone." },
     verbose = { key = "verbose", on = "Per-kill messages include this enemy's totals.", off = "Per-kill messages are one line." },
+    alerts = { key = "alerts", on = "Green-or-better and rare drops are announced.", off = "Drop announcements off." },
+    sound = { key = "alertSound", on = "Drop announcements play a sound.", off = "Drop announcements are silent." },
 }
 
 local function PrintHelp()
@@ -887,7 +1132,9 @@ local function PrintHelp()
     Print("   /kv - open or close the window")
     Print("   /kv stats - print totals, averages and per-hour rates in chat")
     Print("   /kv mobs [n] - best-paying enemies by average value, in chat")
-    Print("   /kv quiet | empty | dungeons | group | share | tooltip | verbose - toggle an option")
+    Print("   /kv quiet | empty | dungeons | group | share | tooltip | verbose | alerts | sound - toggle an option")
+    Print("   /kv price vendor | auction - value items at vendor or auction price (Auctionator / TSM)")
+    Print("   /kv goal 100g - track progress toward a gold goal;  /kv goal clear - remove it")
     Print("   /kv reset - start the since-reset totals over;  /kv reset all - clear everything")
     Print("   /kv reset mob <name> - forget one enemy's stats")
 end
@@ -907,6 +1154,31 @@ SlashCmdList.KILLVALUE = function(msg)
         local t = TOGGLES[cmd]
         db[t.key] = not db[t.key]
         Print(db[t.key] and t.on or t.off)
+        Notify()
+    elseif cmd == "price" then
+        local src = arg:lower()
+        if src == "vendor" or src == "auction" then db.priceSource = src end
+        if db.priceSource == "auction" and not HasAuctionSource() then
+            Print("Item values: auction price - but no Auctionator or TSM was found, so vendor prices are used.")
+        else
+            Print("Item values: " .. (db.priceSource == "auction" and "auction price (minus the 5% cut, never below vendor)." or "vendor price."))
+        end
+        Notify()
+    elseif cmd == "goal" then
+        if arg:lower() == "clear" or arg:lower() == "off" then
+            db.goal = nil
+            Print("Gold goal cleared.")
+        else
+            local copper = ParseMoney(arg)
+            if copper and copper > 0 then
+                db.goal = copper
+                Print("Goal set: " .. GoalText())
+            elseif db.goal then
+                Print("Goal: " .. GoalText())
+            else
+                Print("Usage: /kv goal 100g  (or 50g 25s, 75s)")
+            end
+        end
         Notify()
     elseif cmd == "reset" then
         local lower = arg:lower()
@@ -947,7 +1219,8 @@ local function Init()
     db.mobs = db.mobs or {}
     db.recent = db.recent or {}
     db.levels = db.levels or {}
-    db.version = 2
+    db.zones = db.zones or {}
+    db.version = 3
     runStart = GetTime()
     ns.db = db
     BuildGatherSpells()
@@ -959,13 +1232,18 @@ local function Init()
     frame:RegisterEvent("CHAT_MSG_COMBAT_XP_GAIN")
     frame:RegisterEvent("CHAT_MSG_MONEY")
     frame:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
+    frame:RegisterEvent("PLAYER_REGEN_DISABLED")
+    frame:RegisterEvent("PLAYER_REGEN_ENABLED")
+    frame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
+    frame:RegisterEvent("PLAYER_ENTERING_WORLD")
+    zoneNow, zoneSince = ZoneName(), GetTime()
 
     local ok, registered = pcall(frame.RegisterEvent, frame, "PARTY_KILL")
     if not ok or registered == false then
         Print("this client has no PARTY_KILL event, so only kills you loot will be counted.")
     end
 
-    if ns.OnInit then ns.OnInit() end
+    for _, fn in ipairs(ns.inits) do pcall(fn) end
 end
 
 frame:RegisterEvent("ADDON_LOADED")
@@ -987,9 +1265,16 @@ frame:SetScript("OnEvent", function(self, event, ...)
         OnMoneyMessage((...))
     elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
         OnSpellcast(...)
+    elseif event == "PLAYER_REGEN_DISABLED" then
+        OnCombatStart()
+    elseif event == "PLAYER_REGEN_ENABLED" then
+        OnCombatEnd()
+    elseif event == "ZONE_CHANGED_NEW_AREA" or event == "PLAYER_ENTERING_WORLD" then
+        ZoneTick()
     elseif event == "PLAYER_LOGOUT" then
         -- Fires on logout and /reload, just before saved variables are written.
         db.run.played, runStart = RunSeconds(), GetTime()
+        ZoneTick()
     end
 end)
 
