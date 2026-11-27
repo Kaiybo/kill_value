@@ -91,7 +91,9 @@ CanLootUnit = function() return true end
 GetSpellInfo = function(id) return "Spell" .. id end
 local zone = "Westfall"
 GetRealZoneText = function() return zone end
-GetMoney = function() return 120000 end
+local money, repairBill = 120000, 0
+GetMoney = function() return money end
+GetRepairAllCost = function() return repairBill end
 local sounds = 0
 PlaySound = function() sounds = sounds + 1 end
 local ldbObject
@@ -259,9 +261,25 @@ local pg = ns.Predict("Defias Thug")
 check(pg.gatherAvg == 30 and pg.gatherRate > 0, "tooltip prediction includes skinning")
 check(pg.margin and pg.margin > 0, "confidence range computed")
 
+-- Repairs: buying something and repairing at the same merchant counts only the repair
+repairBill = 2500
+fire("MERCHANT_SHOW")
+money = money - 300; fire("PLAYER_MONEY")            -- bought a drink
+money = money - 2500; fire("PLAYER_MONEY")           -- repair all: money first...
+repairBill = 0; fire("UPDATE_INVENTORY_DURABILITY")  -- ...then the bill
+fire("MERCHANT_CLOSED")
+check(db.run.repairs == 2500 and db.total.repairs == 2500, "repair cost recorded: " .. tostring(db.run.repairs))
+check(ns.NetValue(db.run) == ns.StatsValue(db.run) + ns.GatherValue(db.run) - 2500, "net value subtracts repairs")
+repairBill = 800
+fire("MERCHANT_SHOW"); repairBill = 0; fire("UPDATE_INVENTORY_DURABILITY"); fire("MERCHANT_CLOSED")
+check(db.run.repairs == 2500, "guild-bank repair (no money spent) not counted")
+fire("PLAYER_MONEY")
+check(db.run.repairs == 2500, "money changes away from a merchant ignored")
+
 -- Sessions: a reset archives the current session
 SlashCmdList.KILLVALUE("reset")
 check(#db.sessions == 1 and db.sessions[1].kills > 0 and db.run.kills == 0, "reset archives the session")
+check(db.sessions[1].repairs == 2500 and db.run.repairs == 0, "session keeps its repairs")
 kill("Creature-0-1-2-3-116-0012", 100, { { type = 2, name = "40 Copper", qty = 40 } })
 
 -- Tooltip

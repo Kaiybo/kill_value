@@ -258,6 +258,7 @@ local function BuildOverview(panel)
     Row("runSplit", "Coin / items")
     Row("runGather", "Skinning / Pick Pocket")
     Row("runHour", "Per hour played")
+    Row("runNet", "Net after repairs")
     Row("runFight", "Per hour fighting")
     Row("runXP", "Experience")
     Row("runLevel", "To next level")
@@ -318,6 +319,13 @@ local function RefreshOverview(panel)
             ns.Duration(run.combat), math.min(100, run.combat / math.max(1, seconds) * 100)))
     else
         v.runFight:SetText(GREY .. "-|r")
+    end
+    if (run.repairs or 0) > 0 then
+        local net = ns.NetPerHour()
+        v.runNet:SetText(("%s%s  %s(%s repairs)|r"):format(
+            net and (Money(net) .. GREY .. "/h|r  ") or "", Money(ns.NetValue(run)), GREY, Money(run.repairs)))
+    else
+        v.runNet:SetText(GREY .. "no repairs yet|r")
     end
     v.runXP:SetText(XPLine(run))
     if (run.gathered or 0) > 0 then
@@ -689,7 +697,7 @@ local SESSION_COLUMNS = {
     { label = "Played",    x = 118, w = 56,  justify = "RIGHT" },
     { label = "Kills",     x = 178, w = 48,  justify = "RIGHT" },
     { label = "Value",     x = 230, w = 100, justify = "RIGHT" },
-    { label = "Per hour",  x = 334, w = 96,  justify = "RIGHT" },
+    { label = "Net / hour", x = 334, w = 96,  justify = "RIGHT" },
     { label = "XP / hour", x = 434, w = 64,  justify = "RIGHT" },
     { label = "Avg / kill", x = 502, w = 100, justify = "RIGHT" },
 }
@@ -704,10 +712,10 @@ local function SessionList()
     local run = ns.db.run
     local list = { {
         current = true, since = run.since, played = ns.RunSeconds(), kills = run.kills,
-        value = ns.StatsValue(run) + ns.GatherValue(run), xp = run.xp,
+        value = ns.StatsValue(run) + ns.GatherValue(run), repairs = run.repairs or 0, xp = run.xp,
     } }
     for _, r in ipairs(ns.db.sessions or {}) do
-        list[#list + 1] = { since = r.since, played = r.played or 0, kills = r.kills, value = r.value + (r.gather or 0), xp = r.xp or 0 }
+        list[#list + 1] = { since = r.since, played = r.played or 0, kills = r.kills, value = r.value + (r.gather or 0), repairs = r.repairs or 0, xp = r.xp or 0 }
     end
     return list
 end
@@ -721,12 +729,12 @@ local function RefreshSessions(panel)
         return {
             (r.current and "|cff00ff00now|r " or "") .. GREY .. SessionDate(r.since) .. "|r",
             ns.Duration(r.played), tostring(r.kills), ns.Money(r.value),
-            timed and ns.Money(r.value / hours) or GREY .. "-|r",
+            timed and ns.Money((r.value - r.repairs) / hours) or GREY .. "-|r",
             timed and XPText(r.xp / hours) or GREY .. "-|r",
             r.kills > 0 and ns.Money(r.value / r.kills) or GREY .. "-|r",
         }
     end)
-    Footer(panel, list, state.sessionOffset, "sessions", "a new one starts each reset")
+    Footer(panel, list, state.sessionOffset, "sessions", "net = value minus repairs; a new one starts each reset")
 end
 
 local function BuildSessions(panel)
@@ -796,11 +804,11 @@ local EXPORTS = {
         return out
     end,
     sessions = function()
-        local out = { "started,seconds_played,kills,value_gold,value_per_hour_gold,xp,xp_per_hour" }
+        local out = { "started,seconds_played,kills,value_gold,value_per_hour_gold,repairs_gold,net_per_hour_gold,xp,xp_per_hour" }
         for _, r in ipairs(SessionList()) do
             local hours = math.max(r.played, 1) / 3600
             out[#out + 1] = table.concat({ r.since and date and date("%Y-%m-%d %H:%M", r.since) or "", ("%.0f"):format(r.played),
-                r.kills, Gold(r.value), Gold(r.value / hours), r.xp, ("%.0f"):format(r.xp / hours) }, ",")
+                r.kills, Gold(r.value), Gold(r.value / hours), Gold(r.repairs), Gold((r.value - r.repairs) / hours), r.xp, ("%.0f"):format(r.xp / hours) }, ",")
         end
         return out
     end,

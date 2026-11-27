@@ -11,7 +11,7 @@ read_globals = {
     "IsFishingLoot", "IsInGroup", "IsInInstance", "MAX_PLAYER_LEVEL", "TooltipDataProcessor", "UIParent",
     "UISpecialFrames", "UnitCanAttack", "UnitClassification", "UnitCreatureType", "UnitExists", "UnitGUID",
     "UnitIsDead", "UnitIsPlayer", "UnitIsTapDenied", "UnitLevel", "UnitName", "UnitXP", "UnitXPMax",
-    "issecretvalue", "date", "time", "Auctionator", "TSM_API", "PlaySound", "SOUNDKIT", "GetMoney",
+    "issecretvalue", "date", "time", "Auctionator", "TSM_API", "PlaySound", "SOUNDKIT", "GetMoney", "GetRepairAllCost",
     "GetRealZoneText", "GetZoneText", "LibStub", "ChatFontNormal",
     "GOLD_AMOUNT", "SILVER_AMOUNT", "COPPER_AMOUNT", "LOOT_MONEY_SPLIT",
     "COMBATLOG_XPGAIN_FIRSTPERSON", "COMBATLOG_XPGAIN_EXHAUSTION1", "COMBATLOG_XPGAIN_EXHAUSTION2",

@@ -254,7 +254,7 @@ end
 -- xp/xpKills count every kill that gave experience, looted or not.
 local function NewStats()
     return { kills = 0, value = 0, coin = 0, items = 0, itemCount = 0, best = 0,
-             xp = 0, xpKills = 0, combat = 0, loot = {} }
+             xp = 0, xpKills = 0, combat = 0, repairs = 0, loot = {} }
 end
 
 local function Upgrade(s)
@@ -421,6 +421,12 @@ local function StatsValue(s)
     local recordedItems = 0
     for _, e in pairs(s.loot or {}) do recordedItems = recordedItems + e.value end
     return s.value - recordedItems + LootValue(s.loot)
+end
+
+-- What a stats bucket earned after repair bills: kill value + Skinning /
+-- Pick Pocket - repairs paid at vendors.
+local function NetValue(s)
+    return StatsValue(s) + GatherValue(s) - (s.repairs or 0)
 end
 
 local function StatsItems(s)
@@ -1026,7 +1032,7 @@ end
 ns.MobKillTime, ns.MobXPPerHour, ns.MIN_TIMED = MobKillTime, MobXPPerHour, MIN_TIMED
 ns.StatsValue, ns.StatsItems, ns.MobValue, ns.ItemPrice = StatsValue, StatsItems, MobValue, ItemPrice
 ns.HasAuctionSource, ns.UseAuction, ns.ZoneSeconds = HasAuctionSource, UseAuction, ZoneSeconds
-ns.GatherValue, ns.BucketValue = GatherValue, BucketValue
+ns.GatherValue, ns.BucketValue, ns.NetValue = GatherValue, BucketValue, NetValue
 ns.Predict, ns.MobXP, ns.XPToLevel, ns.EstimateXP = Predict, MobXP, XPToLevel, EstimateXP
 ns.Readable, ns.Safe, ns.IsJunkCreature = Readable, Safe, IsJunkCreature
 
@@ -1041,7 +1047,7 @@ local function ArchiveRun()
     table.insert(db.sessions, 1, {
         since = r.since, ended = Now(), played = RunSeconds(), combat = r.combat,
         kills = r.kills, xpKills = r.xpKills, value = StatsValue(r), coin = r.coin,
-        gather = GatherValue(r), xp = r.xp, best = r.best, bestName = r.bestName,
+        gather = GatherValue(r), repairs = r.repairs or 0, xp = r.xp, best = r.best, bestName = r.bestName,
     })
     while #db.sessions > SESSION_MAX do table.remove(db.sessions) end
 end
@@ -1065,6 +1071,46 @@ local function ResetMob(name)
     db.mobs[name] = nil
     Notify()
     return true
+end
+
+------------------------------------------------------------------------
+-- Repairs
+------------------------------------------------------------------------
+
+-- The game has no "you paid N for repairs" event, so while a merchant is
+-- open we watch both your money and the repair bill (GetRepairAllCost). When
+-- the bill drops and your money drops, the smaller of the two drops is what
+-- the repair cost you. Guild-bank repairs don't touch your money, so they
+-- aren't counted. Buying something and repairing in the same visit still
+-- counts only the repair, since the bill can't fall by more than you paid.
+local merchant -- { cost, money, spent, fixed } while a merchant window is open
+
+local function RepairCost()
+    local cost = Safe(GetRepairAllCost)
+    return type(cost) == "number" and cost or 0
+end
+
+local function AddRepair(copper)
+    if copper <= 0 then return end
+    for _, s in ipairs({ db.run, db.total }) do s.repairs = (s.repairs or 0) + copper end
+    Notify()
+end
+
+local function OnMerchantShow()
+    merchant = { cost = RepairCost(), money = Safe(GetMoney) or 0, spent = 0, fixed = 0 }
+end
+
+local function OnMerchantUpdate()
+    if not merchant then return end
+    local cost, money = RepairCost(), Safe(GetMoney) or 0
+    if money < merchant.money then merchant.spent = merchant.spent + (merchant.money - money) end
+    if cost < merchant.cost then merchant.fixed = merchant.fixed + (merchant.cost - cost) end
+    merchant.cost, merchant.money = cost, money
+    local paid = math.min(merchant.spent, merchant.fixed)
+    if paid > 0 then
+        merchant.spent, merchant.fixed = merchant.spent - paid, merchant.fixed - paid
+        AddRepair(paid)
+    end
 end
 
 ------------------------------------------------------------------------
@@ -1096,6 +1142,13 @@ local function PerHour()
     return StatsValue(db.run) / (seconds / 3600)
 end
 
+-- Net gold per hour played, after repairs (nil until 3 minutes in).
+local function NetPerHour()
+    local seconds = RunSeconds()
+    if seconds < 180 then return nil end
+    return NetValue(db.run) / (seconds / 3600)
+end
+
 -- "12g of 50g (24%) - ~430 kills, ~3h 10m at this pace"
 local function GoalText()
     if not db.goal or db.goal <= 0 then return nil end
@@ -1103,7 +1156,7 @@ local function GoalText()
     local text = ("%s of %s (%d%%)"):format(Money(have), Money(db.goal), math.min(100, have / db.goal * 100))
     local left = db.goal - have
     if left <= 0 then return text .. " |cff00ff00- reached!|r" end
-    local avg, rate = Average(db.run), PerHour()
+    local avg, rate = Average(db.run), NetPerHour()
     if avg > 0 then text = text .. (" - ~%d kills"):format(math.ceil(left / avg)) end
     if rate and rate > 0 then text = text .. (", ~%s at this pace"):format(Duration(left / rate * 3600)) end
     return text
@@ -1136,7 +1189,7 @@ end
 ns.Money, ns.Average, ns.AverageXP, ns.Plural, ns.Duration = Money, Average, AverageXP, Plural, Duration
 ns.RunSeconds, ns.SinceText, ns.ResetRun, ns.ResetAll, ns.ResetMob = RunSeconds, SinceText, ResetRun, ResetAll, ResetMob
 ns.Print, ns.Notify = Print, Notify
-ns.GoalText, ns.ParseMoney, ns.PerHour = GoalText, ParseMoney, PerHour
+ns.GoalText, ns.ParseMoney, ns.PerHour, ns.NetPerHour = GoalText, ParseMoney, PerHour, NetPerHour
 
 local function PrintSummary()
     Print(StatsLine(SinceLabel(), db.run))
@@ -1153,6 +1206,11 @@ local function PrintSummary()
     end
     if (db.run.gathered or 0) > 0 then
         Print(("   plus %s from Skinning / Pick Pocket (%s)"):format(Money(GatherValue(db.run)), Plural(db.run.gathered, "time")))
+    end
+    if (db.run.repairs or 0) > 0 then
+        local net = NetPerHour()
+        Print(("   repairs: -%s  |cffffffffnet %s%s|r"):format(Money(db.run.repairs), Money(NetValue(db.run)),
+            net and (", " .. Money(net) .. " per hour") or ""))
     end
     if (db.run.combat or 0) >= 60 then
         Print(("   per hour of fighting: %s, %d XP  |cff999999(%s in combat)|r"):format(
@@ -1326,6 +1384,10 @@ local function Init()
     frame:RegisterEvent("PLAYER_REGEN_ENABLED")
     frame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
     frame:RegisterEvent("PLAYER_ENTERING_WORLD")
+    frame:RegisterEvent("MERCHANT_SHOW")
+    frame:RegisterEvent("MERCHANT_CLOSED")
+    frame:RegisterEvent("PLAYER_MONEY")
+    frame:RegisterEvent("UPDATE_INVENTORY_DURABILITY")
     zoneNow, zoneSince = ZoneName(), GetTime()
 
     local ok, registered = pcall(frame.RegisterEvent, frame, "PARTY_KILL")
@@ -1361,6 +1423,13 @@ frame:SetScript("OnEvent", function(self, event, ...)
         OnCombatEnd()
     elseif event == "ZONE_CHANGED_NEW_AREA" or event == "PLAYER_ENTERING_WORLD" then
         ZoneTick()
+    elseif event == "MERCHANT_SHOW" then
+        OnMerchantShow()
+    elseif event == "MERCHANT_CLOSED" then
+        OnMerchantUpdate()
+        merchant = nil
+    elseif event == "PLAYER_MONEY" or event == "UPDATE_INVENTORY_DURABILITY" then
+        OnMerchantUpdate()
     elseif event == "PLAYER_LOGOUT" then
         -- Fires on logout and /reload, just before saved variables are written.
         db.run.played, runStart = RunSeconds(), GetTime()
