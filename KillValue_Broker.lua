@@ -27,6 +27,11 @@ local function ShowTooltip(tt)
     tt:AddDoubleLine("Average per kill", Money(ns.Average(run)), 1, 1, 1, 1, 1, 1)
     local rate = ns.PerHour()
     if rate then tt:AddDoubleLine("Per hour played", Money(rate), 1, 1, 1, 1, 1, 1) end
+    if (run.repairs or 0) > 0 then
+        tt:AddDoubleLine("Repairs", "-" .. Money(run.repairs), 1, 1, 1, 1, 0.5, 0.5)
+        local net = ns.NetPerHour()
+        if net then tt:AddDoubleLine("Net per hour", Money(net), 1, 1, 1, 1, 1, 1) end
+    end
     if (run.xpKills or 0) > 0 then
         tt:AddDoubleLine("XP", ("%d  (avg %d)"):format(run.xp, ns.AverageXP(run) + 0.5), 1, 1, 1, 0.5, 0.5, 1)
     end

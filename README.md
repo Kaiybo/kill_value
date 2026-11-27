@@ -63,6 +63,8 @@ Other commands:
 
 **Auction prices:** with Auctionator or TradeSkillMaster installed, `/kv price auction` values items at auction price minus the 5% auction house cut, and never below their vendor price. Everything is recorded at vendor price and re-valued when it's displayed, so you can switch back and forth freely.
 
+**Repairs:** money you spend repairing at a vendor is recorded, and the Overview, Sessions tab, `/kv stats` and the info-bar tooltip show **net gold per hour after repairs**. The gold goal's time estimate uses the net rate. Guild-bank repairs cost you nothing, so they aren't counted.
+
 **Gold goal:** `/kv goal 100g` shows your current gold against the goal, plus roughly how many kills and how much playtime are left at your current pace.
 
 **Info bars and minimap:** if you use an info-bar addon (Titan Panel, ChocolateBar, ElvUI datatexts), KillValue adds a gold-per-hour readout to it with a summary tooltip. If LibDBIcon is loaded, you also get a minimap button.
